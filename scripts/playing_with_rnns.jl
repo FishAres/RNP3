@@ -24,7 +24,7 @@ CUDA.allowscalar(false)
 
 args = Dict(
     :bsz => 64, :img_size => (28, 28), :π => 32,
-    :esz => 32, :add_offset => true,
+    :esz => 32, :add_offset => true, :fa_out => identity,
 )
 
 ## ======
@@ -53,7 +53,7 @@ sampling_grid_2d = sampling_grid[1:2, :, :]
 
 scale_offset = let
     tmp = zeros(Float32, 6, args[:bsz])
-    tmp[[1, 4], :] .= 2.0f0
+    tmp[[1, 4], :] .= 4.8f0
     tmp
 end |> gpu
 
@@ -65,6 +65,12 @@ end |> gpu
 ## ====
 
 # * RNNs
+
+
+## fa activation function
+args[:fa_out] = sin
+
+## ======
 
 fx_param_lenghts = rec_rnn_θ_sizes(args[:esz], args[:π])
 # ! cuidado, los decoderos son los que tienen el mismo tamaño que los encoderos
@@ -102,7 +108,7 @@ function get_models(θs, model_bounds)
     W̄ϵ = get_rn_θs(Θ[3], args[:π], args[:π])
 
     fx = ps_to_RN(W̄x; rn_fun=RN)
-    fa = ps_to_RN(W̄a; rn_fun=RN, f_out=identity)
+    fa = ps_to_RN(W̄a; rn_fun=RN, f_out=args[:fa_out])
     fϵ = ps_to_RN(W̄ϵ; rn_fun=RN)
 
     Enc_ϵ_fx = Chain(HyDense(784, args[:esz], Θ[4], elu), flatten)
@@ -118,48 +124,78 @@ function model_forward(z, x, model_bounds)
 
     err0 = randn(Float32, 784, args[:bsz]) |> gpu
     ê_fx = Enc_ϵ_fx(err0)
-    a1 = fa(fx.state)
+    # a1 = fa(fx.state)
     z1 = fx(ê_fx)
+    a1 = fa(fx.state)
 
     x̂ = Dec_z_x̂(z1)
-    patch_t = zoom_in(x, xy, sampling_grid)
-    out = sample_patch(x̂, xy, sampling_grid)
+    patch_t = zoom_in(x, a1, sampling_grid)
+    out = sample_patch(x̂, a1, sampling_grid)
 
-    err = Zygote.ignore() do
-        flatten(patch_t) .- x̂
-    end
+    # err = Zygote.ignore() do
+    # flatten(patch_t) .- x̂
+    # end
+    err = flatten(patch_t) .- x̂
+
     hϵ = fϵ(Enc_ϵ_z(err))
     for t = 2:2
         err0 = randn(Float32, 784, args[:bsz]) |> gpu
         ê_fx = Enc_ϵ_fx(err0)
-        a1 = fa(fx.state)
+        # a1 = fa(fx.state)
         z1 = fx(ê_fx)
-
+        a1 = fa(fx.state)
         x̂ = Dec_z_x̂(z1)
-        patch_t = zoom_in(x, xy, sampling_grid)
-        err = Zygote.ignore() do
-            flatten(patch_t) .- x̂
-        end
-
+        patch_t = zoom_in(x, a1, sampling_grid)
+        # err = Zygote.ignore() do
+        # flatten(patch_t) .- x̂
+        # end
+        err = flatten(patch_t) .- x̂
         hϵ = fϵ(Enc_ϵ_z(err))
-        out += sample_patch(x̂, xy, sampling_grid)
+        out += sample_patch(x̂, a1, sampling_grid)
     end
     out, hϵ
 end
 
+
+
 function model_loop(z, x)
     out, hϵ = model_forward(z, x, model_bounds)
-    for i in 2:2
+    for i in 2:seqlen
         z = fz2(hϵ)
         out2, hϵ = model_forward(z, x, model_bounds)
         out += out2
     end
     out
 end
+"fix these two with the same code"
+function get_loop(z, x)
+    patches = []
+    out, hϵ = model_forward(z, x, model_bounds)
+    push!(patches, out)
+    for i in 2:seqlen
+        z = fz2(hϵ)
+        out2, hϵ = model_forward(z, x, model_bounds)
+        out += out2
+        push!(patches, out2)
+    end
+    patches |> cpu
+end
+
+# function model_loss(x, z)
+# out = model_loop(z, x)
+# Flux.mse(flatten(out), flatten(x))
+# end
 
 function model_loss(x, z)
-    out = model_loop(z, x)
-    Flux.mse(flatten(out), flatten(x))
+    out, hϵ = model_forward(z, x, model_bounds)
+    L = Flux.mse(flatten(out), flatten(x))
+    for i in 2:seqlen
+        z = fz2(hϵ)
+        out2, hϵ = model_forward(z, x, model_bounds)
+        out += out2
+        L += Flux.mse(flatten(out), flatten(x))
+    end
+    L
 end
 
 function plot_rec(out, x, ind)
@@ -170,10 +206,25 @@ function plot_rec(out, x, ind)
     return plot(p1, p2)
 end
 
-function plot_recs(xs, inds)
+function plot_rec(out, x, xs, ind)
+    out_ = reshape(cpu(out), 28, 28, size(out)[end])
+    x_ = reshape(cpu(x), 28, 28, size(x)[end])
+    p1 = plot_digit(out_[:, :, ind])
+    p2 = plot_digit(x_[:, :, ind])
+    p3 = plot([plot_digit(x[:, :, 1, ind]) for x in xs]...)
+    return plot(p1, p2, p3, layout=(1, 3))
+end
+
+
+
+function plot_recs(x, inds; plot_seq=true)
     z = randn(Float32, args[:π], args[:bsz]) |> gpu
-    out = model_loop(z, xs)
-    p = [plot_rec(out, xs, ind) for ind in inds]
+    out = model_loop(z, x)
+    p = plot_seq ? let
+        patches = get_loop(z, x)
+        [plot_rec(out, x, patches, ind) for ind in inds]
+    end : [plot_rec(out, x, ind) for ind in inds]
+
     return plot(p...; layout=(length(inds), 1), size=(400, 800))
 end
 
@@ -188,24 +239,6 @@ function sample_loader(loader)
     end
     x_
 end
-
-
-
-## =====
-err0 = randn(Float32, 784, args[:bsz]) |> gpu
-
-opt = ADAM(1e-4)
-
-for epoch in 1:20
-    ls = train_model(opt, ps, train_loader; epoch=epoch)
-    p = plot_recs(sample_loader(test_loader), 1:6)
-    display(p)
-    L = test_model(test_loader)
-    @info "Test loss: $L"
-end
-
-
-## =====
 
 function train_model(opt, ps, train_data; epoch=1)
     progress_tracker = Progress(length(train_data), 1, "Training epoch $epoch :)")
@@ -230,5 +263,23 @@ function test_model(test_data)
         L += model_loss(x, zs[i])
     end
     return L / length(test_data)
+end
+
+## ====
+seqlen = 3
+
+
+p = plot_recs(sample_loader(test_loader), 1:6)
+opt = ADAM(1e-4)
+
+for epoch in 1:20
+    ls = train_model(opt, ps, train_loader; epoch=epoch)
+    inds = sample(1:args[:bsz], 6, replace=false)
+    p = plot_recs(sample_loader(test_loader), inds)
+    # savefig(p, "plots/meow_$(epoch).png")
+    display(p)
+
+    L = test_model(test_loader)
+    @info "Test loss: $L"
 end
 

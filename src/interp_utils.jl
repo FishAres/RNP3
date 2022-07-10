@@ -19,18 +19,34 @@ function get_sampling_grid(width, height; args=args)
     return Float32.(sampling_grid)
 end
 
+function grid_generator_2d(sampling_grid_2d, thetas; args=args)
+    if args[:add_offset]
+        thetas = isa(thetas, CuArray) ? thetas .+ scale_offset_2d : thetas .+ cpu(scale_offset_2d)
+    end
+    sc = thetas[1:2, :]
+    bs = sc .* thetas[3:4, :]
+    return unsqueeze(sc, 2) .* sampling_grid_2d .+ unsqueeze(bs, 2)
+end
+
+function grid_generator_3d(sampling_grid_3d, thetas; args=args)
+    if args[:add_offset]
+        thetas = isa(thetas, CuArray) ? thetas .+ scale_offset_3d : thetas .+ cpu(scale_offset_3d)
+    end
+    thetas = vcat(thetas[1:4, :], thetas[1:2, :] .* thetas[5:6, :])
+    thetas = reshape(thetas, 2, 3, size(thetas)[end])
+    tr_grid = batched_mul(thetas, sampling_grid_3d)
+    return tr_grid
+end
+
 "caution, scale_offset is defined as const outside the function"
 function affine_grid_generator(sampling_grid, thetas; args=args, sz=args[:img_size])
     bsz = size(thetas)[end]
-    if args[:add_offset]
-        thetas = isa(thetas, CuArray) ? thetas .+ scale_offset : thetas .+ cpu(scale_offset)
+    tr_grid = if size(sampling_grid, 1) > 2
+        grid_generator_3d(sampling_grid, thetas)
+    else
+        grid_generator_2d(sampling_grid, thetas)
     end
-    # test
-    thetas = vcat(thetas[1:4, :], thetas[1:2, :] .* thetas[5:6, :])
-    thetas = reshape(thetas, 2, 3, bsz)
-    tr_grid = batched_mul(thetas, sampling_grid)
     return reshape(tr_grid, 2, sz..., bsz)
-    return tr_grid
 end
 
 
@@ -86,9 +102,12 @@ Zygote.@nograd function zoom_in(x, xy, sampling_grid; args=args)
     sampling_grid_2d = sampling_grid[1:2, :]
     A, Ainv, b_, b_inv = get_transform_matrix(xy)
     Ai = cat(Ainv..., dims=3)
-    gn = batched_mul(gpu(Ai), sampling_grid_2d) .+ gpu(unsqueeze(hcat(b_inv...), 2))
+    # gn = batched_mul(gpu(Ai), sampling_grid_2d) .+ gpu(unsqueeze(hcat(b_inv...), 2))
+    gn = batched_mul(gpu(Ai), sampling_grid_2d) .+ gpu(unsqueeze(hcat(b_...), 2))
     # gn = batched_mul(gpu(Ai), sampling_grid_2d)
     gn = reshape(gn, 2, 28, 28, size(gn)[end])
     x = reshape(x, args[:img_size]..., 1, size(x)[end])
     grid_sample(x, gn; padding_mode=:zeros)
 end
+
+
