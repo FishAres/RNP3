@@ -20,25 +20,21 @@ function get_sampling_grid(width, height; args=args)
 end
 
 function grid_generator_2d(sampling_grid_2d, thetas; args=args)
-    if args[:add_offset]
-        thetas = isa(thetas, CuArray) ? thetas .+ scale_offset_2d : thetas .+ cpu(scale_offset_2d)
-    end
-    sc = thetas[1:2, :]
+    sc = abs(args[:scale_offset]) > 0.0f0 ? thetas[1:2, :] .+ args[:scale_offset] : thetas[1:2, :]
     bs = sc .* thetas[3:4, :]
     return unsqueeze(sc, 2) .* sampling_grid_2d .+ unsqueeze(bs, 2)
 end
 
 function grid_generator_3d(sampling_grid_3d, thetas; args=args)
-    if args[:add_offset]
-        thetas = isa(thetas, CuArray) ? thetas .+ scale_offset_3d : thetas .+ cpu(scale_offset_3d)
-    end
-    thetas = vcat(thetas[1:4, :], thetas[1:2, :] .* thetas[5:6, :])
+
+    sc = thetas[1:2, :] .+ args[:scale_offset]
+    # thetas = vcat(sc[1:1, :], thetas[2:3, :], sc[2:2, :], sc .* thetas[5:6, :])
+    thetas = vcat(sc, thetas[2:3, :], sc .* thetas[5:6, :])
     thetas = reshape(thetas, 2, 3, size(thetas)[end])
     tr_grid = batched_mul(thetas, sampling_grid_3d)
     return tr_grid
 end
 
-"caution, scale_offset is defined as const outside the function"
 function affine_grid_generator(sampling_grid, thetas; args=args, sz=args[:img_size])
     bsz = size(thetas)[end]
     tr_grid = if size(sampling_grid, 1) > 2
@@ -70,7 +66,7 @@ function make_invertible!(A)
 end
 
 "from 6-param xy get A, inv(A) of Ax + b"
-function get_transform_matrix(xy)
+function get_transform_matrix(xy; scale_b=true)
     xy = cpu(xy)
     S = xy[[1, 4], :]
     θ = xy[2, :]
@@ -82,7 +78,7 @@ function get_transform_matrix(xy)
 
     # add scale_offset
     As = if args[:add_offset]
-        offs = cpu(scale_offset)[1, 1]
+        offs = args[:scale_offset]
         [[(S[1, i]+1+offs) 0; 0 (S[2, i]+1+offs)] for i in 1:bsz]
     else
         [[(S[1, i]+1) 0; 0 (S[2, i]+1)] for i in 1:bsz]
@@ -92,20 +88,19 @@ function get_transform_matrix(xy)
 
     # Ainv = map((x, y, z) -> inv(x) * inv(y) * inv(z), Arot, As, Ashear)
     Ainv = map(inv, A)
-
-    b_inv = map(*, map(inv, As), eachcol(b))
-    b_ = map(*, As, eachcol(b))
-    A, Ainv, b_, b_inv
+    b_ = collect(eachcol(b))
+    b_ = scale_b ? map(*, As, b_) : b_
+    A, Ainv, b_
 end
 
-Zygote.@nograd function zoom_in(x, xy, sampling_grid; args=args)
-    sampling_grid_2d = sampling_grid[1:2, :]
-    A, Ainv, b_, b_inv = get_transform_matrix(xy)
+Zygote.@nograd function zoom_in(x, xy, sampling_grid; args=args, scale_b=true)
+    dev = isa(xy, CuArray) ? gpu : cpu
+    sampling_grid_2d = sampling_grid[1:2, :, :]
+    A, Ainv, b_ = get_transform_matrix(xy; scale_b=scale_b)
     Ai = cat(Ainv..., dims=3)
-    # gn = batched_mul(gpu(Ai), sampling_grid_2d) .+ gpu(unsqueeze(hcat(b_inv...), 2))
-    gn = batched_mul(gpu(Ai), sampling_grid_2d) .+ gpu(unsqueeze(hcat(b_...), 2))
-    # gn = batched_mul(gpu(Ai), sampling_grid_2d)
-    gn = reshape(gn, 2, 28, 28, size(gn)[end])
+    xy_ = cpu(sampling_grid_2d) .- unsqueeze(hcat(b_...), 2)
+    gn = batched_mul(Ai, xy_)
+    gn = reshape(gn, 2, 28, 28, size(gn)[end]) |> dev
     x = reshape(x, args[:img_size]..., 1, size(x)[end])
     grid_sample(x, gn; padding_mode=:zeros)
 end
