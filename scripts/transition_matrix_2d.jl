@@ -15,12 +15,12 @@ using ProgressMeter: Progress
 
 include(srcdir("interp_utils.jl"))
 include(srcdir("hypernet_utils.jl"))
+include(srcdir("nn_utils.jl"))
 include(srcdir("plotting_utils.jl"))
 include(srcdir("logging_utils.jl"))
 include(srcdir("utils.jl"))
 
 include(srcdir("model_utils_2d.jl"))
-
 
 CUDA.allowscalar(false)
 
@@ -56,28 +56,6 @@ sampling_grid = get_sampling_grid(args[:img_size]...) |> gpu
 sampling_grid = sampling_grid[1:2, :, :]
 
 ## ====
-using Distributions
-thetas = rand(Uniform(-1.0f0, 1.0f0), 4, args[:bsz]) |> gpu
-out = sample_patch(x, thetas, sampling_grid)
-outi = zoom_in2d(x, thetas, sampling_grid)
-outix = zoom_in2d(x, thetas, sampling_grid)
-
-
-begin
-    ind = mod(ind + 1, args[:bsz]) + 1
-    px = plot_digit(cpu(x)[:, :, ind])
-    po = plot_digit(cpu(out)[:, :, 1, ind])
-    poi = let
-        plot_digit(cpu(outi)[:, :, 1, ind])
-        plot_digit!(cpu(x)[:, :, ind], alpha=0.4)
-    end
-
-    plot(px, po, poi,)
-end
-
-
-
-## =====
 
 Vx_sz = (args[:π], args[:π],)
 Va_sz = (args[:asz], args[:asz],)
@@ -91,6 +69,7 @@ l_dec_a = args[:asz] * args[:asz] + args[:asz] # decoder z -> a, with bias
 model_bounds = [map(sum, (prod(Vx_sz), prod(Va_sz),))...; l_enc; l_dec_x; l_dec_a]
 
 lθ = sum(model_bounds)
+println(lθ, " parameters for primary")
 # ! initializes z_0, a_0 
 H = Chain(
     LayerNorm(args[:π],),
@@ -108,10 +87,10 @@ ps = Flux.params(H)
 sum(map(prod, size.(ps)))
 
 ## ====
-args[:seqlen] = 5
+args[:seqlen] = 6
 args[:scale_offset] = 3.2f0
-# args[:δL] = Float32(1 / args[:seqlen])
 args[:δL] = round(Float32(1 / 6), digits=3)
+args[:λ] = 0.005f0
 opt = ADAM(1e-3)
 
 begin
@@ -126,10 +105,13 @@ begin
         push!(Ls, ls)
     end
 end
-## ====
-
 
 ## =====
+
+L = vcat(Ls...)
+plot(log.(1:length(L)), log.(L))
+plot(L)
+
 inds = sample(1:args[:bsz], 6, replace=false)
 p = plot_recs(sample_loader(test_loader), inds)
 
@@ -143,31 +125,59 @@ begin
     plot(p...)
 end
 
-patches, preds, errs, xys, zs = get_loop(z, x)
+patches, preds, errs, xys, z1s, zs, patches_t, Vxs = get_loop(z, x)
+zz = cat(zs..., dims=3)
+
+ind = 0
 p1 = begin
     ind = mod(ind + 1, 64) + 1
-    pp = plot([plot_digit(reshape(x[:, ind], 28, 28),) for x in patches]...)
-    pe = plot([plot_digit(reshape(x[:, ind], 28, 28), boundc=false, colorbar=true) for x in errs]...)
+    pp = plot([plot_digit(reshape(x[:, ind], 28, 28), c=:jet, boundc=false, colorbar=true) for x in patches]...)
+    pe = plot([plot_digit(reshape(x[:, ind], 28, 28), c=:jet, boundc=false, colorbar=true) for x in errs]...)
     p1 = plot(pp, pe, layout=(2, 1))
 
     px = plot_digit(reshape(cpu(x)[:, :, ind], 28, 28))
-    plot(px, p1, layout=(2, 1), size=(600, 800))
+    pout = plot_digit(preds[end][:, :, 1, ind])
+    pz = plot(zz[:, ind, :]', legend=false)
+    cc = heatmap(cor(zz[:, ind, :]))
+    plot(plot(px, pout,), p1, plot(pz, cc), layout=(3, 1), size=(600, 900))
 end
 
-xys[1]
+zz = cat(zs..., dims=3)
+pz = heatmap(zz[:, ind, :])
+plot(zz[:, ind, :]', legend=false)
 
 
-begin
-    ind = mod(ind + 1, 64) + 1
-    as = [sample_patch(patch, xy, sampling_grid |> cpu) for (patch, xy) in zip(patches, xys)]
-    p = [plot_digit(a[:, :, 1, ind]) for a in as]
-    pe = plot_digit(preds[end][:, :, 1, ind])
-    plot(p..., pe)
-end
+p = [heatmap(Vx[:, :, ind]) for Vx in Vxs]
+plot(p...)
 
-a = hcat(xys...)
-histogram(a[1, :])
-histogram!(a[2, :])
+λs = [eigvals(Vx[:, :, ind]) for Vx in Vxs]
 
-histogram(a[3, :] .* a[1, :])
-histogram!(a[4, :] .* a[2, :])
+lls = hcat(map(x -> real.(x), λs)...)
+plot(lls', legend=false)
+
+
+# xys[1]
+
+
+# begin
+#     ind = mod(ind + 1, 64) + 1
+#     as = [sample_patch(patch, xy, sampling_grid |> cpu) for (patch, xy) in zip(patches, xys)]
+#     p = [plot_digit(a[:, :, 1, ind], clim=(-0.5, 1)) for a in as]
+#     pe = plot_digit(preds[end][:, :, 1, ind])
+#     plot(p..., pe)
+# end
+
+# a = hcat(xys...)
+
+# histogram(a[1, :])
+# histogram!(a[2, :])
+
+# histogram(a[3, :] .* a[1, :])
+# histogram!(a[4, :] .* a[2, :])
+
+# b = cat(xys..., dims=3)
+
+# begin
+#     ind = mod(ind + 1, 64) + 1
+#     heatmap(b[:, ind, :], c=:jet)
+# end

@@ -1,6 +1,23 @@
 using LinearAlgebra, Statistics
-using Flux, Zygote
+using Flux, Zygote, CUDA
 using Flux: unsqueeze
+using Images
+
+dev = has_cuda() ? gpu : cpu
+
+# constant matrices for "nice" affine transformation
+const ones_vec = ones(1, 1, args[:bsz]) |> dev
+const zeros_vec = zeros(1, 1, args[:bsz]) |> dev
+const diag_vec = [[1 0; 0 1] for _ in 1:args[:bsz]] |> dev
+
+
+function filter_batch(x, f, p::Number=1.0f0)
+    sz = size(x)
+    x = length(sz) > 3 ? dropdims(x, dims=3) : x
+    x = collect(eachslice(cpu(x), dims=3))
+    out = cat([imfilter(k[:, :, 1], f(p)) for k in x]..., dims=3)
+    out = length(sz) > 3 ? unsqueeze(out, 3) : out
+end
 
 "generate sampling grid 3 x (width x height) x (batch size)"
 function get_sampling_grid(width, height; args=args)
@@ -19,90 +36,39 @@ function get_sampling_grid(width, height; args=args)
     return Float32.(sampling_grid)
 end
 
-function grid_generator_2d(sampling_grid_2d, thetas; args=args)
-    sc = abs(args[:scale_offset]) > 0.0f0 ? thetas[1:2, :] .+ args[:scale_offset] : thetas[1:2, :]
-    bs = sc .* thetas[3:4, :]
-    return unsqueeze(sc, 2) .* sampling_grid_2d .+ unsqueeze(bs, 2)
+function get_affine_mats(thetas; scale_offset=0.0f0)
+    b = thetas[1:2, :]
+    sc = thetas[3:4, :]
+    theta_rot = thetas[5, :]
+    theta_sh = reshape(thetas[6, :], 1, 1, :)
+
+    cos_rot = reshape(cos.(theta_rot), 1, 1, :)
+    sin_rot = reshape(sin.(theta_rot), 1, 1, :)
+
+    A_rot = hcat(vcat(cos_rot, -sin_rot), vcat(sin_rot, cos_rot))
+    A_s = cat(map((x, y) -> (x .+ 1.0f0 .+ scale_offset) .* y, eachcol(sc), diag_vec)..., dims=3)
+    A_shear = hcat(vcat(ones_vec, theta_sh), vcat(zeros_vec, ones_vec))
+
+    return A_rot, A_s, A_shear, b
 end
 
-function grid_generator_3d(sampling_grid_3d, thetas; args=args)
-
-    sc = thetas[1:2, :] .+ args[:scale_offset]
-    # thetas = vcat(sc[1:1, :], thetas[2:3, :], sc[2:2, :], sc .* thetas[5:6, :])
-    thetas = vcat(sc, thetas[2:3, :], sc .* thetas[5:6, :])
-    thetas = reshape(thetas, 2, 3, size(thetas)[end])
-    tr_grid = batched_mul(thetas, sampling_grid_3d)
-    return tr_grid
+function grid_generator_3d(sampling_grid_2d, thetas)
+    A_rot, A_s, A_shear, b = get_affine_mats(thetas)
+    A = batched_mul(batched_mul(A_rot, A_shear), A_s)
+    return batched_mul(A, sampling_grid_2d) .+ unsqueeze(b, 2)
 end
 
-function affine_grid_generator(sampling_grid, thetas; args=args, sz=args[:img_size])
-    bsz = size(thetas)[end]
-    tr_grid = if size(sampling_grid, 1) > 2
-        grid_generator_3d(sampling_grid, thetas)
-    else
-        grid_generator_2d(sampling_grid, thetas)
-    end
-    return reshape(tr_grid, 2, sz..., bsz)
+function get_inv_grid(sampling_grid_2d, thetas)
+    A_rot, A_s, A_shear, b = get_affine_mats(thetas)
+    sh_inv = cat(map(inv, eachslice(cpu(A_shear), dims=3))..., dims=3)
+    sc_inv = cat(map(inv, eachslice(cpu(A_s), dims=3))..., dims=3)
+    rot_inv = cat(map(inv, eachslice(cpu(A_rot), dims=3))..., dims=3)
+    Ainv = batched_mul(batched_mul(sc_inv, sh_inv), rot_inv) |> gpu
+    return batched_mul(Ainv, (sampling_grid_2d .- unsqueeze(b, 2)))
 end
 
-
-function sample_patch(x, xy, sampling_grid; sz=args[:img_size])
-    ximg = reshape(x, sz..., 1, size(x)[end])
-    tr_grid = affine_grid_generator(sampling_grid, xy; sz=sz)
-    grid_sample(ximg, tr_grid; padding_mode=:zeros)
+function sample_patch(grid, x; sz=args[:img_size])
+    tg = reshape(grid, 2, sz..., size(grid)[end])
+    x = reshape(x, sz..., 1, size(x)[end])
+    grid_sample(x, tg; padding_mode=:zeros)
 end
-
-## === for inverting the grid
-
-
-rotmat(θ) = [cos(θ) sin(θ); -sin(θ) cos(θ)]
-shearmat(s) = [1 s; 0 1]
-
-function make_invertible!(A)
-    for (i, a_) in enumerate(A)
-        a_[diagind(a_)[findall(iszero, diag(a_))]] .= 1.0f-3
-    end
-    # A
-end
-
-"from 6-param xy get A, inv(A) of Ax + b"
-function get_transform_matrix(xy; scale_b=true)
-    xy = cpu(xy)
-    S = xy[[1, 4], :]
-    θ = xy[2, :]
-    s = xy[3, :]
-    b = xy[5:6, :]
-    bsz = size(xy)[end]
-    Arot = map(rotmat, θ)
-    Ashear = map(shearmat, s)
-
-    # add scale_offset
-    As = if args[:add_offset]
-        offs = args[:scale_offset]
-        [[(S[1, i]+1+offs) 0; 0 (S[2, i]+1+offs)] for i in 1:bsz]
-    else
-        [[(S[1, i]+1) 0; 0 (S[2, i]+1)] for i in 1:bsz]
-    end
-    make_invertible!(As)
-    A = map(*, Arot, As, Ashear)
-
-    # Ainv = map((x, y, z) -> inv(x) * inv(y) * inv(z), Arot, As, Ashear)
-    Ainv = map(inv, A)
-    b_ = collect(eachcol(b))
-    b_ = scale_b ? map(*, As, b_) : b_
-    A, Ainv, b_
-end
-
-Zygote.@nograd function zoom_in(x, xy, sampling_grid; args=args, scale_b=true)
-    dev = isa(xy, CuArray) ? gpu : cpu
-    sampling_grid_2d = sampling_grid[1:2, :, :]
-    A, Ainv, b_ = get_transform_matrix(xy; scale_b=scale_b)
-    Ai = cat(Ainv..., dims=3)
-    xy_ = cpu(sampling_grid_2d) .- unsqueeze(hcat(b_...), 2)
-    gn = batched_mul(Ai, xy_)
-    gn = reshape(gn, 2, 28, 28, size(gn)[end]) |> dev
-    x = reshape(x, args[:img_size]..., 1, size(x)[end])
-    grid_sample(x, gn; padding_mode=:zeros)
-end
-
-

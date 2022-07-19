@@ -11,17 +11,20 @@ end
 Zygote.@nograd function zoom_in2d(x, xy, sampling_grid; args=args)
     dev = isa(x, CuArray) ? gpu : cpu
 
-    y = sample_patch(x, xy, sampling_grid)
+    # y = sample_patch(x, xy, sampling_grid)
 
     Ai, bs = get_inv(xy) |> dev
     tr_grid = unsqueeze(Ai, 2) .* (sampling_grid .- unsqueeze(bs, 2))
     tr_grid = reshape(tr_grid, 2, args[:img_size]..., args[:bsz])
 
-    ximg = reshape(y, args[:img_size]..., 1, args[:bsz])
+    ximg = reshape(x, args[:img_size]..., 1, args[:bsz])
     grid_sample(ximg, tr_grid; padding_mode=:zeros)
 end
 
 ## ====
+
+σ1(x) = σ(x) - typeof(x)(0.5)
+
 
 function get_models(θs, model_bounds; init_zs=true)
     inds = init_zs ? [0; cumsum([model_bounds...; args[:π]; args[:asz]])] : [0; cumsum(model_bounds)]
@@ -30,9 +33,10 @@ function get_models(θs, model_bounds; init_zs=true)
 
     Vx = reshape(Θ[1], args[:π], args[:π], args[:bsz])
     Va = reshape(Θ[2], args[:asz], args[:asz], args[:bsz])
-    # Vϵ = reshape(Θ[3], args[:π], args[:π], args[:bsz])
 
-    Enc_ϵ_z = Chain(HyDense(784, args[:π], Θ[3], relu), flatten)
+    # dudt ?
+    Enc_ϵ_z = Chain(HyDense(784, args[:π], Θ[3], σ1), flatten)
+    # tanh to cancel out previous patches    
     Dec_z_x̂ = Chain(HyDense(args[:π], 784, Θ[4], relu), flatten)
 
     Dec_z_a = Chain(HyDense(args[:asz], args[:asz], Θ[5],), flatten)
@@ -45,116 +49,80 @@ end
 
 Δa(a, Va, Dec_z_a) = sin.(Dec_z_a(bmul(a, Va)))
 
-function full_loop(z, x)
-    θs = H(z)
-    Vx, Va, Enc_ϵ_z, Dec_z_x̂, Dec_z_a, z0, a0 = get_models(θs, model_bounds)
+# update_z(z, Δz) = max.(z, Δz)
+update_z(z, Δz) = z + Δz
 
-    z1 = bmul(z0, Vx)
-    a1 = Δa(a0, Va, Dec_z_a)
+function forward_pass(z1, a1, models, x)
+    Vx, Va, Enc_ϵ_z, Dec_z_x̂, Dec_z_a = models
+    z1 = bmul(z1, Vx) # linear transition
+    a1 = Δa(a1, Va, Dec_z_a)
     x̂ = Dec_z_x̂(z1)
     patch_t = zoom_in2d(x, a1, sampling_grid) |> flatten
     ϵ = patch_t .- x̂
     Δz = Enc_ϵ_z(ϵ)
-    out = sample_patch(x̂, a1, sampling_grid)
-    for t = 2:args[:seqlen]
-        # z = σ.(z + Δz)
-        z = Δz
-        θs = H(z)
-        Vx, Va, Enc_ϵ_z, Dec_z_x̂, Dec_z_a, z0, a0 = get_models(θs, model_bounds)
-
-        z1 = bmul(z1, Vx)
-        # a1 = bmul(a1, Va)
-        a1 = Δa(a1, Va, Dec_z_a)
-        x̂ = Dec_z_x̂(z1)
-        patch_t = zoom_in2d(x, a1, sampling_grid) |> flatten
-        ϵ = patch_t .- x̂
-        Δz = Enc_ϵ_z(ϵ)
-
-        out += sample_patch(x̂, a1, sampling_grid)
-    end
-    out
+    return z1, a1, x̂, patch_t, ϵ, Δz
 end
 
-# todo please fix this to avoid bugs you've spent so much time on before
-# * 1 bug!
 
-function get_loop(z, x)
-    patches, recs, errs, xys, zs = [], [], [], [], []
-    θs = H(z)
-    Vx, Va, Enc_ϵ_z, Dec_z_x̂, Dec_z_a, z0, a0 = get_models(θs, model_bounds)
-
-    z1 = bmul(z0, Vx)
-    # a1 = bmul(a0, Va)
-    a1 = Δa(a0, Va, Dec_z_a)
-    x̂ = Dec_z_x̂(z1)
-    patch_t = zoom_in2d(x, a1, sampling_grid) |> flatten
-    ϵ = patch_t .- x̂
-    Δz = Enc_ϵ_z(ϵ)
-    out = sample_patch(x̂, a1, sampling_grid)
-
-    push!(patches, cpu(x̂))
-    push!(recs, cpu(out))
-    push!(errs, cpu(ϵ))
-    push!(xys, cpu(a1))
-    push!(zs, cpu(z))
-    for t = 2:args[:seqlen]
-        # z = elu.(z + Δz)
-        z = Δz
-        # z += Δz
-        θs = H(z)
-        Vx, Va, Enc_ϵ_z, Dec_z_x̂, Dec_z_a, _, _ = get_models(θs, model_bounds)
-
-        z1 = bmul(z1, Vx)
-        # a1 = bmul(a1, Va)
-        a1 = Δa(a1, Va, Dec_z_a)
-        x̂ = Dec_z_x̂(z1)
-        patch_t = zoom_in2d(x, a1, sampling_grid) |> flatten
-        ϵ = patch_t .- x̂
-        Δz = Enc_ϵ_z(ϵ)
-
-        out += sample_patch(x̂, a1, sampling_grid)
-
-        push!(patches, cpu(x̂))
-        push!(recs, cpu(out))
-        push!(errs, cpu(ϵ))
-        push!(xys, cpu(a1))
-        push!(zs, cpu(z))
+Zygote.@nograd function push_to_arrays!(outputs, arrays)
+    for (output, array) in zip(outputs, arrays)
+        push!(array, cpu(output))
     end
-    patches, recs, errs, xys, zs
 end
+
 
 function model_loss(z, x)
     θs = H(z)
     Vx, Va, Enc_ϵ_z, Dec_z_x̂, Dec_z_a, z0, a0 = get_models(θs, model_bounds)
+    models = Vx, Va, Enc_ϵ_z, Dec_z_x̂, Dec_z_a
 
-    z1 = bmul(z0, Vx)
-    a1 = Δa(a0, Va, Dec_z_a)
-    x̂ = Dec_z_x̂(z1)
-    patch_t = zoom_in2d(x, a1, sampling_grid) |> flatten
-    ϵ = patch_t .- x̂
-    Δz = Enc_ϵ_z(ϵ)
+    # is z0, a0 necessary?
+    z1, a1, x̂, patch_t, ϵ, Δz = forward_pass(z0, a0, models, x)
+
     out = sample_patch(x̂, a1, sampling_grid)
-    L = mean(ϵ .^ 2)
+    Lx = mean(ϵ .^ 2)
     for t = 2:args[:seqlen]
-        # z = elu.(z + Δz)
-        z = Δz
-        # z += Δz
+        z = update_z(z, Δz)
         θs = H(z)
         Vx, Va, Enc_ϵ_z, Dec_z_x̂, Dec_z_a, z0, a0 = get_models(θs, model_bounds)
-
-        z1 = bmul(z1, Vx)
-        # a1 = bmul(a1, Va)
-        a1 = Δa(a1, Va, Dec_z_a)
-        x̂ = Dec_z_x̂(z1)
-        patch_t = zoom_in2d(x, a1, sampling_grid) |> flatten
-        ϵ = patch_t .- x̂
-        Δz = Enc_ϵ_z(ϵ)
-
+        models = Vx, Va, Enc_ϵ_z, Dec_z_x̂, Dec_z_a
+        z1, a1, x̂, patch_t, ϵ, Δz = forward_pass(z1, a1, models, x)
         out += sample_patch(x̂, a1, sampling_grid)
-        L += mean(ϵ .^ 2)
+        Lx += mean(ϵ .^ 2)
     end
-    Flux.mse(flatten(out), flatten(x)) + args[:δL] * L + args[:λ] * norm(Flux.params(H))
+    rec_loss = Flux.mse(flatten(out), flatten(x))
+    local_loss = args[:δL] * Lx
+    return rec_loss + local_loss + args[:λ] * norm(Flux.params(H))
 end
+
+function get_loop(z, x)
+    outputs = patches, recs, errs, xys, z1s, zs, patches_t, Vxs = [], [], [], [], [], [], [], []
+
+    θs = H(z)
+    Vx, Va, Enc_ϵ_z, Dec_z_x̂, Dec_z_a, z0, a0 = get_models(θs, model_bounds)
+    models = Vx, Va, Enc_ϵ_z, Dec_z_x̂, Dec_z_a
+
+    z1, a1, x̂, patch_t, ϵ, Δz = forward_pass(z0, a0, models, x)
+
+    out = sample_patch(x̂, a1, sampling_grid)
+    Lx = mean(ϵ .^ 2)
+
+    push_to_arrays!((x̂, out, ϵ, a1, z1, z, patch_t, Vx), outputs)
+    for t = 2:args[:seqlen]
+        z = update_z(z, Δz)
+        θs = H(z)
+        Vx, Va, Enc_ϵ_z, Dec_z_x̂, Dec_z_a, z0, a0 = get_models(θs, model_bounds)
+        models = Vx, Va, Enc_ϵ_z, Dec_z_x̂, Dec_z_a
+        z1, a1, x̂, patch_t, ϵ, Δz = forward_pass(z1, a1, models, x)
+        out += sample_patch(x̂, a1, sampling_grid)
+        Lx += mean(ϵ .^ 2)
+
+        push_to_arrays!((x̂, out, ϵ, a1, z1, z, patch_t, Vx), outputs)
+    end
+    return outputs
+end
+
+
 
 
 # function model_loss(z, x)
@@ -213,7 +181,7 @@ function plot_rec(out, x, xs, ind)
     x_ = reshape(cpu(x), 28, 28, size(x)[end])
     p1 = plot_digit(out_[:, :, ind])
     p2 = plot_digit(x_[:, :, ind])
-    p3 = plot([plot_digit(x[:, :, 1, ind]) for x in xs]...)
+    p3 = plot([plot_digit(x[:, :, 1, ind], boundc=false) for x in xs]...)
     return plot(p1, p2, p3, layout=(1, 3))
 end
 
