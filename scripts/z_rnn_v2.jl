@@ -34,7 +34,7 @@ args = Dict(
 
 ## =====
 
-device!(0)
+device!(1)
 
 dev = gpu
 
@@ -69,8 +69,8 @@ function get_models(θs, model_bounds; init_zs=true)
     Vx = reshape(Θ[1], args[:π], args[:π], args[:bsz])
     Va = reshape(Θ[2], args[:asz], args[:asz], args[:bsz])
 
-    Enc_za_z = Chain(HyDense(args[:π] + args[:asz], args[:π], Θ[3], tanh), flatten)
-    Enc_za_a = Chain(HyDense(args[:π] + args[:asz], args[:asz], Θ[4], tanh), flatten)
+    Enc_za_z = Chain(HyDense(args[:π] + args[:asz], args[:π], Θ[3], gelu), flatten)
+    Enc_za_a = Chain(HyDense(args[:π] + args[:asz], args[:asz], Θ[4], gelu), flatten)
 
     Enc_ϵ_z = Chain(HyDense(784, args[:π], Θ[5], tanh), flatten)
     Dec_z_x̂ = Chain(HyDense(args[:π], 784, Θ[6], relu), flatten)
@@ -188,7 +188,8 @@ H = Chain(
 
 println("# hypernet params: $(sum(map(prod, size.(Flux.params(H)))))")
 
-RN2 = RNN(args[:π], args[:π], ) |> gpu
+
+RN2 = RNN(args[:π], args[:π], gelu) |> gpu
 
 ps = Flux.params(H, RN2)
 
@@ -199,11 +200,12 @@ args[:scale_offset] = 2.4f0
 args[:δL] = round(Float32(1 / args[:seqlen]), digits=3)
 # args[:δL] = 0.0f0
 args[:λ] = 0.006f0
-opt = ADAM(1e-3)
+opt = ADAM(1e-4)
 
+# todo try sinusoidal lr schedule
 
 begin
-    Ls = []
+    # Ls = []
     for epoch in 1:20
         ls = train_model(opt, ps, train_loader; epoch=epoch)
         inds = sample(1:args[:bsz], 6, replace=false)
@@ -212,11 +214,15 @@ begin
         L = test_model(test_loader)
         @info "Test loss: $L"
         push!(Ls, ls)
+        # if epoch % 50 == 0
+        # save_model((H, RN2), "az_to_az_2σ_$(epoch)eps")
+        # end
     end
 end
-
-## =====
+save_model((H, RN2), savename(args) * "_az_to_az_elu_2_30eps")
+## ====
 L = vcat(Ls...)
+plot(L)
 plot(log.(1:length(L)), log.(L))
 
 z = randn(args[:π], args[:bsz]) |> dev
@@ -241,7 +247,7 @@ begin
     plot(p1...)
 end
 
-patches_t[1]
+# patches_t[1]
 using LaTeXStrings
 ind = 0
 p1 = begin
@@ -261,44 +267,44 @@ end
 
 
 
-## =====
+# ## =====
 
-function forward_pass(z1, a1, models, x)
-    Vx, Va, Enc_za_z, Enc_za_a, Enc_ϵ_z, Dec_z_x̂, Dec_z_a = models
+# function forward_pass(z1, a1, models, x)
+#     Vx, Va, Enc_za_z, Enc_za_a, Enc_ϵ_z, Dec_z_x̂, Dec_z_a = models
 
-    za = vcat(z1, a1)
-    ez = Enc_za_z(za)
-    ea = Enc_za_a(za)
-    z1 = bmul(ez, Vx) # linear transition
-    a1 = Δa(ea, Va, Dec_z_a)
-    x̂ = Dec_z_x̂(z1)
-    patch_t = zoom_in2d(x, a1, sampling_grid) |> flatten
-    ϵ = patch_t .- x̂
-    # ϵ = x̂
-    # ϵ = patch_t
-    # ϵ = 0.1f0 * randn(size(patch_t)) |> gpu |> flatten
-    Δz = Enc_ϵ_z(ϵ)
-    return z1, a1, x̂, patch_t, ϵ, Δz
-end
+#     za = vcat(z1, a1)
+#     ez = Enc_za_z(za)
+#     ea = Enc_za_a(za)
+#     z1 = bmul(ez, Vx) # linear transition
+#     a1 = Δa(ea, Va, Dec_z_a)
+#     x̂ = Dec_z_x̂(z1)
+#     patch_t = zoom_in2d(x, a1, sampling_grid) |> flatten
+#     ϵ = patch_t .- x̂
+#     # ϵ = x̂
+#     # ϵ = patch_t
+#     # ϵ = 0.1f0 * randn(size(patch_t)) |> gpu |> flatten
+#     Δz = Enc_ϵ_z(ϵ)
+#     return z1, a1, x̂, patch_t, ϵ, Δz
+# end
 
-inds = sample(1:args[:bsz], 6, replace=false)
-p = plot_recs(sample_loader(test_loader), inds)
+# inds = sample(1:args[:bsz], 6, replace=false)
+# p = plot_recs(sample_loader(test_loader), inds)
 
 
-@time patches, preds, errs, xys, z1s, zs, patches_t, Vxs = get_loop(z, x)
-zz = cat(zs..., dims=3)
-p1 = begin
-    # ind = mod(ind + 1, 64) + 1
-    # pp = plot([plot_digit(reshape(x[:, :, 1, ind], 28, 28), c=:jet, boundc=false, colorbar=true) for x in recs]...)
-    pp = plot([plot_digit(reshape(x[:, ind], 28, 28), c=:jet, boundc=false, colorbar=true) for x in patches]..., title="predictions", titlefontsize=10)
-    pe = plot([plot_digit(reshape(x[:, ind], 28, 28), c=:jet, boundc=false, colorbar=true) for x in patches_t]..., title="patches", titlefontsize=10)
+# @time patches, preds, errs, xys, z1s, zs, patches_t, Vxs = get_loop(z, x)
+# zz = cat(zs..., dims=3)
+# p1 = begin
+#     # ind = mod(ind + 1, 64) + 1
+#     # pp = plot([plot_digit(reshape(x[:, :, 1, ind], 28, 28), c=:jet, boundc=false, colorbar=true) for x in recs]...)
+#     pp = plot([plot_digit(reshape(x[:, ind], 28, 28), c=:jet, boundc=false, colorbar=true) for x in patches]..., title="predictions", titlefontsize=10)
+#     pe = plot([plot_digit(reshape(x[:, ind], 28, 28), c=:jet, boundc=false, colorbar=true) for x in patches_t]..., title="patches", titlefontsize=10)
 
-    p1 = plot(pp, pe, layout=(2, 1))
+#     p1 = plot(pp, pe, layout=(2, 1))
 
-    px = plot_digit(reshape(cpu(x)[:, :, ind], 28, 28))
-    pout = plot_digit(preds[end][:, :, 1, ind])
-    pz = plot(zz[:, ind, :]', legend=false, title=L"z^2")
-    cc = heatmap(cor(zz[:, ind, :]))
-    plot(plot(px, pout,), p1, plot(pz, cc), layout=(3, 1), size=(600, 900))
-end
+#     px = plot_digit(reshape(cpu(x)[:, :, ind], 28, 28))
+#     pout = plot_digit(preds[end][:, :, 1, ind])
+#     pz = plot(zz[:, ind, :]', legend=false, title=L"z^2")
+#     cc = heatmap(cor(zz[:, ind, :]))
+#     plot(plot(px, pout,), p1, plot(pz, cc), layout=(3, 1), size=(600, 900))
+# end
 
