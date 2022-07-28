@@ -9,14 +9,15 @@ function get_inv(thetas; scale_offset=args[:scale_offset])
 end
 
 Zygote.@nograd function zoom_in2d(x, xy, sampling_grid; args=args)
-    dev = isa(x, CuArray) ? gpu : cpu
+    # dev = isa(x, CuArray) ? gpu : cpu
 
     # tr_grid = grid_generator_3d(sampling_grid, xy)
     inv_grid = get_inv_grid(sampling_grid, xy)
 
     # out = sample_patch(x, xy, sampling_grid)
     out_inv = sample_patch(x, inv_grid)
-    out_inv |> dev
+    # out_inv |> dev
+    out_inv
 end
 
 ## ====
@@ -145,14 +146,14 @@ function sample_loader(loader)
     x_
 end
 
-function train_model(opt, ps, train_data; epoch=1)
+function train_model(opt, ps, train_data; args=args, epoch=1)
     progress_tracker = Progress(length(train_data), 1, "Training epoch $epoch :)")
     losses = zeros(length(train_data))
     # initial z's drawn from N(0,1)
     zs = [randn(Float32, args[:π], args[:bsz]) for _ in 1:length(train_data)] |> gpu
     for (i, (x, y)) in enumerate(train_data)
         loss, grad = withgradient(ps) do
-            model_loss(zs[i], x)
+            model_loss(zs[i], x) + args[:λ] * norm(Flux.params(H))
         end
         # foreach(x -> clamp!(x, -0.1f0, 0.1f0), grad)
         Flux.update!(opt, ps, grad)

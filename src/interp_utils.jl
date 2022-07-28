@@ -33,24 +33,29 @@ end
 
 dumb_mul(x, y, scale_offset::Float32=args[:scale_offset]) = (x .+ 1.0f0 .+ scale_offset) .* y
 
+@inline function cat_mats(cos_rot, sin_rot, sc, theta_sh)
+    A_rot = hcat(vcat(cos_rot, -sin_rot), vcat(sin_rot, cos_rot))
+    A_s = cat(map(.*, eachcol(sc), diag_vec)..., dims=3)
+    A_shear = hcat(vcat(ones_vec, theta_sh), vcat(zeros_vec, ones_vec))
+    A_rot, A_s, A_shear
+end
+
+@inline add_sc(thetas; scale_offset=0.0f0) = thetas[[1, 4], :] .+ 1.0f0 .+ scale_offset
+
+"a wee bit faster this way"
 @inline function get_affine_mats(thetas; scale_offset=0.0f0)
-
-    sc = thetas[[1, 4], :] .+ 1.0f0 .+ scale_offset
-    b = sc .* thetas[5:6, :]
-    theta_rot = thetas[2, :]
+    sc = add_sc(thetas; scale_offset=scale_offset)
+    b = sc .* (@view thetas[5:6, :])
+    theta_rot = @view thetas[2, :]
     theta_sh = reshape(thetas[3, :], 1, 1, :)
-
     cos_rot = reshape(cos.(theta_rot), 1, 1, :)
     sin_rot = reshape(sin.(theta_rot), 1, 1, :)
 
-    A_rot = hcat(vcat(cos_rot, -sin_rot), vcat(sin_rot, cos_rot))
-    # A_s = cat(map((x, y) -> (x .+ 1.0f0 .+ scale_offset) .* y, eachcol(sc), diag_vec)..., dims=3)
-    A_s = cat(map((x, y) -> x .* y, eachcol(sc), diag_vec)..., dims=3)
-    # A_s = cat(map((x, y) -> dumb_mul(x, y, scale_offset), eachcol(sc), diag_vec)..., dims=3)
-    A_shear = hcat(vcat(ones_vec, theta_sh), vcat(zeros_vec, ones_vec))
+    A_rot, A_s, A_shear = cat_mats(cos_rot, sin_rot, sc, theta_sh)
 
     return A_rot, A_s, A_shear, b
 end
+
 
 function grid_generator_3d(sampling_grid_2d, thetas; scale_offset=args[:scale_offset])
     A_rot, A_s, A_shear, b = get_affine_mats(thetas; scale_offset=scale_offset)
