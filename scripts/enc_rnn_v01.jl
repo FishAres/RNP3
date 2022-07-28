@@ -34,7 +34,7 @@ args = Dict(
 
 ## =====
 
-device!(1)
+device!(0)
 
 dev = gpu
 
@@ -218,13 +218,15 @@ H = Chain(
     LayerNorm(64, gelu),
     Dense(64, 64),
     LayerNorm(64, gelu),
+    Dense(64, 64),
+    LayerNorm(64, gelu),
     Dense(64, lθ + args[:π] + args[:asz], bias=false),
 ) |> gpu
 
 println("# hypernet params: $(sum(map(prod, size.(Flux.params(H)))))")
 
 
-RN2 = RNN(args[:π], args[:π],) |> gpu
+RN2 = RNN(args[:π], args[:π], gelu) |> gpu
 
 ps = Flux.params(H, RN2)
 
@@ -236,7 +238,7 @@ p = plot_recs(sample_loader(test_loader), inds)
 ## =====
 
 args[:seqlen] = 6
-args[:scale_offset] = 2.4f0
+args[:scale_offset] = 2.6f0
 args[:δL] = round(Float32(1 / args[:seqlen]), digits=3)
 # args[:δL] = 0.0f0
 args[:λ] = 0.006f0
@@ -246,7 +248,7 @@ opt = ADAM(1e-3)
 
 begin
     Ls = []
-    for epoch in 1:100
+    for epoch in 1:20
         ls = train_model(opt, ps, train_loader; epoch=epoch)
         inds = sample(1:args[:bsz], 6, replace=false)
         p = plot_recs(sample_loader(test_loader), inds)
@@ -261,9 +263,9 @@ begin
 end
 
 ## ====
-# L = vcat(Ls...)
-# plot(L)
-# plot(log.(1:length(L)), log.(L))
+L = vcat(Ls...)
+plot(L)
+plot(log.(1:length(L)), log.(L))
 # ## ===
 
 

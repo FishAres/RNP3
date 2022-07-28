@@ -146,14 +146,18 @@ function sample_loader(loader)
     x_
 end
 
-function train_model(opt, ps, train_data; args=args, epoch=1)
+function train_model(opt, ps, train_data; args=args, epoch=1, lg=nothing)
     progress_tracker = Progress(length(train_data), 1, "Training epoch $epoch :)")
     losses = zeros(length(train_data))
     # initial z's drawn from N(0,1)
     zs = [randn(Float32, args[:π], args[:bsz]) for _ in 1:length(train_data)] |> gpu
     for (i, (x, y)) in enumerate(train_data)
         loss, grad = withgradient(ps) do
-            model_loss(zs[i], x) + args[:λ] * norm(Flux.params(H))
+            loss = model_loss(zs[i], x)
+            lg !== nothing && Zygote.ignore() do
+                log_value(lg, "loss", loss)
+            end
+            loss + args[:λ] * norm(Flux.params(H))
         end
         # foreach(x -> clamp!(x, -0.1f0, 0.1f0), grad)
         Flux.update!(opt, ps, grad)

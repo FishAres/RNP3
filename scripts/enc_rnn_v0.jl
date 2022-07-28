@@ -224,11 +224,14 @@ H = Chain(
 println("# hypernet params: $(sum(map(prod, size.(Flux.params(H)))))")
 
 
-RN2 = RNN(args[:π], args[:π], gelu) |> gpu
+RN2 = RNN(args[:π], args[:π],) |> gpu
 
 ps = Flux.params(H, RN2)
 
 ## ======
+
+save_folder = "full_seq_tanh_v0"
+save_dir = get_save_dir(save_folder, savename(args))
 
 inds = sample(1:args[:bsz], 6, replace=false)
 p = plot_recs(sample_loader(test_loader), inds)
@@ -241,34 +244,73 @@ args[:δL] = round(Float32(1 / args[:seqlen]), digits=3)
 # args[:δL] = 0.0f0
 args[:λ] = 0.006f0
 opt = ADAM(1e-3)
-
+lg = new_logger(save_dir, args)
 # todo try sinusoidal lr schedule
 
 begin
     Ls = []
-    for epoch in 1:20
+    for epoch in 1:100
+        if epoch % 10 == 0
+            opt.eta = 0.8f0 * opt.eta
+        end
         ls = train_model(opt, ps, train_loader; epoch=epoch)
         inds = sample(1:args[:bsz], 6, replace=false)
         p = plot_recs(sample_loader(test_loader), inds)
         display(p)
+        log_image(lg, "recs_$(epoch)", p)
         L = test_model(test_loader)
+        log_value(lg, "test_loss", L)
         @info "Test loss: $L"
         push!(Ls, ls)
-        # if epoch % 50 == 0
-        # save_model((H, RN2), "az_to_az_2σ_$(epoch)eps")
-        # end
+        if epoch % 10 == 0
+            save_model((H, RN2), save_dir * "$(epoch)eps")
+        end
     end
 end
 
-## ====
-L = vcat(Ls...)
-plot(L)
-plot(log.(1:length(L)), log.(L))
-## ===
+# ## ====
+# L = vcat(Ls...)
+# plot(L)
+# plot(log.(1:length(L)), log.(L))
+# ## ===
+# p = plot_recs(sample_loader(test_loader), inds)
 
+# z = randn(args[:π], args[:bsz]) |> dev
 
-z = randn(args[:π], args[:bsz]) |> dev
+# @time patches, preds, full_out, errs, xys, z1s, zs, patches_t, Vxs = get_loop(z, x)
+# zz = cat(zs..., dims=3)
 
-@time patches, preds, full_out, errs, xys, z1s, zs, patches_t, Vxs = get_loop(z, x)
-zz = cat(zs..., dims=3)
+# # recs = [sample_patch(x, xy, sampling_grid) for (x, xy) in zip(gpu(patches), gpu(xys))] |> cpu
+# # ind = 0
 
+# # sem(x; dims=1) = std(x, dims=dims) / sqrt(size(x, dims))
+
+# # begin
+# #     ind = mod(ind + 1, 64) + 1
+# #     plot_tings(x, y) =
+# #         let
+# #             p1 = plot_digit(x, c=:grays)
+# #             plot_digit!(y, alpha=0.3, c=:grays)
+# #             p1
+# #         end
+# #     p1 = [plot_tings(rec[:, :, 1, ind], cpu(x)[:, :, ind]) for rec in recs]
+# #     plot(p1...)
+# # end
+
+# # # patches_t[1]
+# using LaTeXStrings
+# # ind = 0
+# p1 = begin
+#     ind = mod(ind + 1, 64) + 1
+#     pp = plot([plot_digit(reshape(x[:, :, 1, ind], 28, 28), c=:jet, boundc=false, colorbar=true) for x in recs]...)
+#     # pp = plot([plot_digit(reshape(x[:, ind], 28, 28), c=:jet, clim=(0, 1), colorbar=true) for x in patches]..., title="predictions", titlefontsize=10)
+#     pe = plot([plot_digit(reshape(x[:, ind], 28, 28), c=:jet, clim=(0, 1), colorbar=true) for x in patches_t]..., title="patches", titlefontsize=10)
+#     # 
+#     p1 = plot(pp, pe, layout=(2, 1))
+#     # 
+#     px = plot_digit(reshape(cpu(x)[:, :, ind], 28, 28))
+#     pout = plot_digit(preds[end][:, :, 1, ind])
+#     pz = plot(zz[:, ind, :]', legend=false, title=L"z^2")
+#     cc = heatmap(cor(zz[:, ind, :]))
+#     plot(plot(px, pout,), p1, plot(pz, cc), layout=(3, 1), size=(600, 900))
+# end
