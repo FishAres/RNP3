@@ -52,6 +52,8 @@ const ones_vec = ones(1, 1, args[:bsz]) |> dev
 const zeros_vec = zeros(1, 1, args[:bsz]) |> dev
 const diag_vec = [[1.0f0 0.0f0; 0.0f0 1.0f0] for _ in 1:args[:bsz]] |> dev
 
+const diag_mat = cat(diag_vec..., dims=3)
+
 ## =====
 
 thetas = let
@@ -72,6 +74,16 @@ end
 @time grid_generator_3d(sampling_grid_2d, thetas)
 
 
+
+
+@inline function get_affine_mats_fast(thetas; scale_offset=0.0f0)
+    sc = add_sc(thetas; scale_offset=scale_offset)
+    b = sc .* (@view thetas[5:6, :])
+    A_rot = get_rot_mat(@view thetas[2, :])
+    A_sc = unsqueeze(sc, 2) .* diag_mat
+    A_shear = get_shear_mat(thetas[3, :])
+    return A_rot, A_sc, A_shear, b
+end
 
 
 function get_inv_grid2(sampling_grid_2d, thetas)

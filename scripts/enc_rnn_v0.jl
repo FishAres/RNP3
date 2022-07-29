@@ -58,10 +58,8 @@ const sampling_grid = (get_sampling_grid(args[:img_size]...)|>dev)[1:2, :, :]
 const ones_vec = ones(1, 1, args[:bsz]) |> dev
 const zeros_vec = zeros(1, 1, args[:bsz]) |> dev
 const diag_vec = [[1.0f0 0.0f0; 0.0f0 1.0f0] for _ in 1:args[:bsz]] |> dev
-
+const diag_mat = cat(diag_vec..., dims=3) |> dev
 ## ====
-
-manzrelu(x) = min(relu(x), 5.0f0)
 
 function get_models(θs, model_bounds; args=args, init_zs=true)
     inds = init_zs ? [0; cumsum([model_bounds...; args[:π]; args[:asz]])] : [0; cumsum(model_bounds)]
@@ -75,7 +73,7 @@ function get_models(θs, model_bounds; args=args, init_zs=true)
     Enc_za_a = Chain(HyDense(args[:π] + args[:asz], args[:asz], Θ[4], tanh), flatten)
 
     Enc_ϵ_z = Chain(HyDense(784, args[:π], Θ[5], tanh), flatten)
-    Dec_z_x̂ = Chain(HyDense(args[:π], 784, Θ[6], manzrelu), flatten)
+    Dec_z_x̂ = Chain(HyDense(args[:π], 784, Θ[6], relu6), flatten)
 
     Dec_z_a = Chain(HyDense(args[:asz], args[:asz], Θ[7],), flatten)
 
@@ -87,6 +85,7 @@ end
 
 Δa(a, Va, Dec_z_a) = sin.(Dec_z_a(bmul(a, Va)))
 
+"todo: calculate error outside gradient"
 function forward_pass(z1, a1, models, x)
     Vx, Va, Enc_za_z, Enc_za_a, Enc_ϵ_z, Dec_z_x̂, Dec_z_a = models
 
@@ -103,10 +102,10 @@ function forward_pass(z1, a1, models, x)
 end
 
 
-function full_sequence(z, x; args=args)
+function full_sequence(z, x; args=args, model_bounds=model_bounds)
     θs = H(z)
     models, z0, a0 = get_models(θs, model_bounds)
-    Vx, Va, Enc_za_z, Enc_za_a, Enc_ϵ_z, Dec_z_x̂, Dec_z_a = models
+    # Vx, Va, Enc_za_z, Enc_za_a, Enc_ϵ_z, Dec_z_x̂, Dec_z_a = models
     # is z0, a0 necessary?
     z1, a1, x̂, patch_t, ϵ, Δz = forward_pass(z0, a0, models, x)
 
@@ -118,7 +117,7 @@ function full_sequence(z, x; args=args)
     return out
 end
 
-function model_loss(z, x; args=args)
+function model_loss(z, x; args=args, model_bounds=model_bounds)
     Flux.reset!(RN2)
     θs = H(z)
 
@@ -149,7 +148,7 @@ function model_loss(z, x; args=args)
     return rec_loss + local_loss + 0.167f0 * Lfull
 end
 
-function get_loop(z, x; args=args)
+function get_loop(z, x; args=args, model_bounds=model_bounds)
     Flux.reset!(RN2)
     outputs = patches, recs, full_out, errs, xys, z1s, zs, patches_t, Vxs = [], [], [], [], [], [], [], [], []
 
@@ -223,37 +222,52 @@ H = Chain(
 
 println("# hypernet params: $(sum(map(prod, size.(Flux.params(H)))))")
 
-
 RN2 = RNN(args[:π], args[:π],) |> gpu
 
 ps = Flux.params(H, RN2)
 
-## ======
+## =====
 
 save_folder = "full_seq_tanh_v0"
-save_dir = get_save_dir(save_folder, savename(args))
+alias = "somewhat_faster"
+save_dir = get_save_dir(save_folder, alias)
 
-inds = sample(1:args[:bsz], 6, replace=false)
-p = plot_recs(sample_loader(test_loader), inds)
+
+## ======
+# 
+# inds = sample(1:args[:bsz], 6, replace=false)
+# p = plot_recs(sample_loader(test_loader), inds)
+
+## ===== search for fast inverse
+# todo LU decomposition or something instead of getting inverse
 
 ## =====
 
+# todo - looks like there are (at least) two optima
+# todo - in the solution: z2 generates the full digit in outer loop
+# todo - with different Vx and Va; or it learns the full digit
+# todo - with the same Vx and Va, but doesn't reconstruct include
+# todo - the outer loop.
+
+# the optima might be complementary - the inner loop provides
+# the next glimpse
+
 args[:seqlen] = 6
-args[:scale_offset] = 2.4f0
+args[:scale_offset] = 2.6f0
 args[:δL] = round(Float32(1 / args[:seqlen]), digits=3)
 # args[:δL] = 0.0f0
-args[:λ] = 0.006f0
+args[:λ] = 0.008f0
 opt = ADAM(1e-3)
 lg = new_logger(save_dir, args)
 # todo try sinusoidal lr schedule
 
 begin
     Ls = []
-    for epoch in 1:100
-        if epoch % 10 == 0
+    for epoch in 1:200
+        if epoch % 15 == 0
             opt.eta = 0.8f0 * opt.eta
         end
-        ls = train_model(opt, ps, train_loader; epoch=epoch)
+        ls = train_model(opt, ps, train_loader; epoch=epoch, logger=lg)
         inds = sample(1:args[:bsz], 6, replace=false)
         p = plot_recs(sample_loader(test_loader), inds)
         display(p)
@@ -263,7 +277,7 @@ begin
         @info "Test loss: $L"
         push!(Ls, ls)
         if epoch % 10 == 0
-            save_model((H, RN2), save_dir * "$(epoch)eps")
+            save_model((H, RN2), save_dir * savename(args) * "$(epoch)eps")
         end
     end
 end
@@ -273,8 +287,9 @@ end
 # plot(L)
 # plot(log.(1:length(L)), log.(L))
 # ## ===
+# inds = sample(1:args[:bsz], 6, replace=false)
 # p = plot_recs(sample_loader(test_loader), inds)
-
+# savefig(p, "plots/rec_optimum_eg0.png")
 # z = randn(args[:π], args[:bsz]) |> dev
 
 # @time patches, preds, full_out, errs, xys, z1s, zs, patches_t, Vxs = get_loop(z, x)

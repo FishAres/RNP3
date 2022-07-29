@@ -146,7 +146,7 @@ function sample_loader(loader)
     x_
 end
 
-function train_model(opt, ps, train_data; args=args, epoch=1, lg=nothing)
+function train_model(opt, ps, train_data; args=args, epoch=1, logger=nothing)
     progress_tracker = Progress(length(train_data), 1, "Training epoch $epoch :)")
     losses = zeros(length(train_data))
     # initial z's drawn from N(0,1)

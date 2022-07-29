@@ -31,29 +31,25 @@ function get_sampling_grid(width, height; args=args)
     return Float32.(sampling_grid)
 end
 
-dumb_mul(x, y, scale_offset::Float32=args[:scale_offset]) = (x .+ 1.0f0 .+ scale_offset) .* y
-
-@inline function cat_mats(cos_rot, sin_rot, sc, theta_sh)
-    A_rot = hcat(vcat(cos_rot, -sin_rot), vcat(sin_rot, cos_rot))
-    A_s = cat(map(.*, eachcol(sc), diag_vec)..., dims=3)
-    A_shear = hcat(vcat(ones_vec, theta_sh), vcat(zeros_vec, ones_vec))
-    A_rot, A_s, A_shear
-end
-
-@inline add_sc(thetas; scale_offset=0.0f0) = thetas[[1, 4], :] .+ 1.0f0 .+ scale_offset
-
-"a wee bit faster this way"
-@inline function get_affine_mats(thetas; scale_offset=0.0f0)
-    sc = add_sc(thetas; scale_offset=scale_offset)
-    b = sc .* (@view thetas[5:6, :])
-    theta_rot = @view thetas[2, :]
-    theta_sh = reshape(thetas[3, :], 1, 1, :)
+function get_rot_mat(theta_rot)
     cos_rot = reshape(cos.(theta_rot), 1, 1, :)
     sin_rot = reshape(sin.(theta_rot), 1, 1, :)
+    hcat(vcat(cos_rot, -sin_rot), vcat(sin_rot, cos_rot))
+end
 
-    A_rot, A_s, A_shear = cat_mats(cos_rot, sin_rot, sc, theta_sh)
+function get_shear_mat(theta_shear)
+    theta_shear = reshape(theta_shear, 1, 1, :)
+    hcat(vcat(ones_vec, theta_shear), vcat(zeros_vec, ones_vec))
+end
 
-    return A_rot, A_s, A_shear, b
+
+@inline function get_affine_mats(thetas; scale_offset=0.0f0)
+    sc = (@view thetas[[1, 4], :]) .+ 1.0f0 .+ scale_offset
+    b = sc .* (@view thetas[5:6, :])
+    A_rot = get_rot_mat(@view thetas[2, :])
+    A_sc = unsqueeze(sc, 2) .* diag_mat
+    A_shear = get_shear_mat(@view thetas[3, :])
+    return A_rot, A_sc, A_shear, b
 end
 
 

@@ -34,7 +34,7 @@ args = Dict(
 
 ## =====
 
-device!(0)
+device!(1)
 
 dev = gpu
 
@@ -57,8 +57,8 @@ const sampling_grid = (get_sampling_grid(args[:img_size]...)|>dev)[1:2, :, :]
 # constant matrices for "nice" affine transformation
 const ones_vec = ones(1, 1, args[:bsz]) |> dev
 const zeros_vec = zeros(1, 1, args[:bsz]) |> dev
-const diag_vec = [[1.0f0 0.0f0; 0.0f0 1.0f0] for _ in 1:args[:bsz]] |> dev
-
+const diag_vec = [[1.0f0 0.0f0; 0.0f0 1.0f0] for _ in 1:args[:bsz]]
+const diag_mat = cat(diag_vec..., dims=3) |> dev
 ## ====
 
 manzrelu(x) = min(relu(x), 5.0f0)
@@ -75,7 +75,7 @@ function get_models(θs, model_bounds; args=args, init_zs=true)
     Enc_za_a = Chain(HyDense(args[:π] + args[:asz], args[:asz], Θ[4], tanh), flatten)
 
     Enc_ϵ_z = Chain(HyDense(784, args[:π], Θ[5], tanh), flatten)
-    Dec_z_x̂ = Chain(HyDense(args[:π], 784, Θ[6], manzrelu), flatten)
+    Dec_z_x̂ = Chain(HyDense(args[:π], 784, Θ[6], relu6), flatten)
 
     Dec_z_a = Chain(HyDense(args[:asz], args[:asz], Θ[7],), flatten)
 
@@ -226,7 +226,7 @@ H = Chain(
 println("# hypernet params: $(sum(map(prod, size.(Flux.params(H)))))")
 
 
-RN2 = RNN(args[:π], args[:π], gelu) |> gpu
+RN2 = RNN(args[:π], args[:π],) |> gpu
 
 ps = Flux.params(H, RN2)
 
