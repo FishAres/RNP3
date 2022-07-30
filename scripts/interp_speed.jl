@@ -56,11 +56,7 @@ const diag_mat = cat(diag_vec..., dims=3)
 
 ## =====
 
-thetas = let
-    thetas = randn(6, args[:bsz])
-    thetas[3, :] .= 0.0f0
-    thetas |> dev
-end
+thetas = randn(6, args[:bsz]) |> gpu
 
 
 function affine_grid_generator(thetas, sampling_grid)
@@ -70,51 +66,20 @@ function affine_grid_generator(thetas, sampling_grid)
     return batched_mul(thetas, sampling_grid)
 end
 
-@time g = affine_grid_generator(thetas, sampling_grid) |> cpu
-@time grid_generator_3d(sampling_grid_2d, thetas)
+@time g = affine_grid_generator(thetas, sampling_grid)
 
+@time gr = grid_generator_3d(sampling_grid_2d, thetas)
+@time gri = get_inv_grid(sampling_grid_2d, thetas)
+@time gri2 = get_inv_grid2(sampling_grid_2d, thetas)
 
-
-
-@inline function get_affine_mats_fast(thetas; scale_offset=0.0f0)
-    sc = add_sc(thetas; scale_offset=scale_offset)
-    b = sc .* (@view thetas[5:6, :])
-    A_rot = get_rot_mat(@view thetas[2, :])
-    A_sc = unsqueeze(sc, 2) .* diag_mat
-    A_shear = get_shear_mat(thetas[3, :])
-    return A_rot, A_sc, A_shear, b
-end
-
-
-function get_inv_grid2(sampling_grid_2d, thetas)
-    sc = thetas[[1, 4], :]
-    rot = thetas[2, :]
-    b = sc .* thetas[5:6, :]
-
-    cos_rot = reshape(cos.(rot), 1, 1, :)
-    sin_rot = reshape(sin.(rot), 1, 1, :)
-
-    A_rot = hcat(vcat(cos_rot, -sin_rot), vcat(sin_rot, cos_rot))
-    A_s = cat(map(.*, eachcol(sc), diag_vec)..., dims=3)
-
-    rot_inv = cat(map(inv, eachslice(cpu(A_rot), dims=3))..., dims=3)
-    sc_inv = cat(map(inv, eachslice(cpu(A_s), dims=3))..., dims=3)
-
-    Ainv = batched_mul(sc_inv, rot_inv) |> gpu
-
-    inv_grid = batched_mul(Ainv, sampling_grid_2d .- unsqueeze(b, 2))
-end
-
-inv_grid = get_inv_grid2(sampling_grid_2d, thetas)
-
-out = sample_patch(x, g |> gpu)
-outi = sample_patch(out, inv_grid)
-ind = 0
+out = sample_patch(x, gr)
+outi = sample_patch(out, gri)
 
 begin
-    ind = mod(ind + 1, 64) + 1
+    ind = mod(ind + 1, args[:bsz]) + 1
     p1 = plot_digit(cpu(out)[:, :, 1, ind])
     p2 = plot_digit(cpu(outi)[:, :, 1, ind])
-    plot_digit!(cpu(x)[:, :, ind], alpha=0.4)
     plot(p1, p2)
 end
+
+A_rot, A_s, A_shear, b = get_affine_mats(thetas; scale_offset=args[:scale_offset])

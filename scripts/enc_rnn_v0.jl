@@ -92,7 +92,7 @@ function forward_pass(z1, a1, models, x)
     za = vcat(z1, a1)
     ez = Enc_za_z(za)
     ea = Enc_za_a(za)
-    z1 = bmul(ez, Vx) # linear transition
+    z1 = bmul(ez, Vx) # linear transition - why?
     a1 = Δa(ea, Va, Dec_z_a)
     x̂ = Dec_z_x̂(z1)
     patch_t = zoom_in2d(x, a1, sampling_grid) |> flatten
@@ -125,20 +125,21 @@ function model_loss(z, x; args=args, model_bounds=model_bounds)
     Vx, Va, Enc_za_z, Enc_za_a, Enc_ϵ_z, Dec_z_x̂, Dec_z_a = models
     # is z0, a0 necessary?
     z1, a1, x̂, patch_t, ϵ, Δz = forward_pass(z0, a0, models, x)
-    z = update_z(z, Δz)
+    z = RN2(Δz)
     z1, a1, x̂, patch_t, ϵ, Δz = forward_pass(z1, a1, models, x)
-    out_full = full_sequence(z1, x)
+    out_full = full_sequence(z, x)
     out = sample_patch(x̂, a1, sampling_grid)
     Lx = mean(ϵ .^ 2)
     Lfull = Flux.mse(flatten(out_full), flatten(x))
     for t = 2:args[:seqlen]
-        z = update_z(z, Δz)
+        # z = update_z(z, Δz)
+        z = RN2(Δz)
         θs = H(z)
         models, z0, a0 = get_models(θs, model_bounds)
         Vx, Va, Enc_za_z, Enc_za_a, Enc_ϵ_z, Dec_z_x̂, Dec_z_a = models
 
         z1, a1, x̂, patch_t, ϵ, Δz = forward_pass(z1, a1, models, x)
-        out_full = full_sequence(z1, x)
+        out_full = full_sequence(z, x)
         out += sample_patch(x̂, a1, sampling_grid)
         Lx += mean(ϵ .^ 2)
         Lfull += Flux.mse(flatten(out_full), flatten(x))
@@ -157,14 +158,14 @@ function get_loop(z, x; args=args, model_bounds=model_bounds)
     Vx, Va, Enc_za_z, Enc_za_a, Enc_ϵ_z, Dec_z_x̂, Dec_z_a = models
 
     z1, a1, x̂, patch_t, ϵ, Δz = forward_pass(z0, a0, models, x)
-    z = update_z(z, Δz)
+    z = RN2(Δz)
     z1, a1, x̂, patch_t, ϵ, Δz = forward_pass(z1, a1, models, x)
     out_full = full_sequence(z, x)
     out = sample_patch(x̂, a1, sampling_grid)
 
     push_to_arrays!((x̂, out, out_full, ϵ, a1, z1, z, patch_t, Vx), outputs)
     for t = 2:args[:seqlen]
-        z = update_z(z, Δz)
+        z = RN2(Δz)
         θs = H(z)
         models, z0, a0 = get_models(θs, model_bounds)
         Vx, Va, Enc_za_z, Enc_za_a, Enc_ϵ_z, Dec_z_x̂, Dec_z_a = models
@@ -217,6 +218,8 @@ H = Chain(
     LayerNorm(64, gelu),
     Dense(64, 64),
     LayerNorm(64, gelu),
+    Dense(64, 64),
+    LayerNorm(64, elu),
     Dense(64, lθ + args[:π] + args[:asz], bias=false),
 ) |> gpu
 
@@ -234,39 +237,88 @@ save_dir = get_save_dir(save_folder, alias)
 
 
 ## ======
-# 
-# inds = sample(1:args[:bsz], 6, replace=false)
-# p = plot_recs(sample_loader(test_loader), inds)
+
+inds = sample(1:args[:bsz], 6, replace=false)
+p = plot_recs(sample_loader(test_loader), inds)
+
 
 ## ===== search for fast inverse
 # todo LU decomposition or something instead of getting inverse
+function model_loss(z, x; args=args, model_bounds=model_bounds)
+    Flux.reset!(RN2)
+    θs = H(z)
+
+    models, z0, a0 = get_models(θs, model_bounds)
+    Vx, Va, Enc_za_z, Enc_za_a, Enc_ϵ_z, Dec_z_x̂, Dec_z_a = models
+    # is z0, a0 necessary?
+    # z1, a1, x̂, patch_t, ϵ, Δz = forward_pass(z0, a0, models, x)
+    # z = update_z(z, Δz)
+    z1, a1, x̂, patch_t, ϵ, Δz = forward_pass(z0, a0, models, x)
+    out_full = full_sequence(z, x)
+    # out = sample_patch(x̂, a1, sampling_grid)
+    Lfull = Flux.mse(flatten(out_full), flatten(x))
+    for t = 2:args[:seqlen]
+        z = RN2(Δz)
+        θs = H(z)
+        models, z0, a0 = get_models(θs, model_bounds)
+        Vx, Va, Enc_za_z, Enc_za_a, Enc_ϵ_z, Dec_z_x̂, Dec_z_a = models
+
+        z1, a1, x̂, patch_t, ϵ, Δz = forward_pass(z1, a1, models, x)
+        out_full = full_sequence(z, x)
+        # out += sample_patch(x̂, a1, sampling_grid)
+        Lfull += Flux.mse(flatten(out_full), flatten(x))
+    end
+    # rec_loss = Flux.mse(flatten(out), flatten(x))
+    # return rec_loss + 0.167f0 * Lfull
+    return Lfull
+end
+
+function get_loop(z, x; args=args, model_bounds=model_bounds)
+    Flux.reset!(RN2)
+    outputs = patches, recs, full_out, errs, xys, z1s, zs, patches_t, Vxs = [], [], [], [], [], [], [], [], []
+
+    θs = H(z)
+    models, z0, a0 = get_models(θs, model_bounds)
+    Vx, Va, Enc_za_z, Enc_za_a, Enc_ϵ_z, Dec_z_x̂, Dec_z_a = models
+
+    # z1, a1, x̂, patch_t, ϵ, Δz = forward_pass(z0, a0, models, x)
+    # z = RN2(Δz)
+    z1, a1, x̂, patch_t, ϵ, Δz = forward_pass(z0, a0, models, x)
+    out_full = full_sequence(z, x)
+    out = sample_patch(x̂, a1, sampling_grid)
+
+    push_to_arrays!((x̂, out, out_full, ϵ, a1, z1, z, patch_t, Vx), outputs)
+    for t = 2:args[:seqlen]
+        z = RN2(Δz)
+        θs = H(z)
+        models, z0, a0 = get_models(θs, model_bounds)
+        Vx, Va, Enc_za_z, Enc_za_a, Enc_ϵ_z, Dec_z_x̂, Dec_z_a = models
+        z1, a1, x̂, patch_t, ϵ, Δz = forward_pass(z1, a1, models, x)
+        out_full = full_sequence(z, x)
+        out += sample_patch(x̂, a1, sampling_grid)
+
+        push_to_arrays!((x̂, out, out_full, ϵ, a1, z1, z, patch_t, Vx), outputs)
+    end
+    return outputs
+end
 
 ## =====
 
-# todo - looks like there are (at least) two optima
-# todo - in the solution: z2 generates the full digit in outer loop
-# todo - with different Vx and Va; or it learns the full digit
-# todo - with the same Vx and Va, but doesn't reconstruct include
-# todo - the outer loop.
-
-# the optima might be complementary - the inner loop provides
-# the next glimpse
-
 args[:seqlen] = 6
 args[:scale_offset] = 2.6f0
-args[:δL] = round(Float32(1 / args[:seqlen]), digits=3)
-# args[:δL] = 0.0f0
-args[:λ] = 0.008f0
-opt = ADAM(1e-3)
+# args[:δL] = round(Float32(1 / args[:seqlen]), digits=3)
+args[:δL] = 0.0f0
+args[:λ] = 0.006f0
+opt = ADAM(1e-4)
 lg = new_logger(save_dir, args)
 # todo try sinusoidal lr schedule
 
 begin
     Ls = []
-    for epoch in 1:200
-        if epoch % 15 == 0
-            opt.eta = 0.8f0 * opt.eta
-        end
+    for epoch in 1:20
+        # if epoch % 15 == 0
+        # opt.eta = 0.8f0 * opt.eta
+        # end
         ls = train_model(opt, ps, train_loader; epoch=epoch, logger=lg)
         inds = sample(1:args[:bsz], 6, replace=false)
         p = plot_recs(sample_loader(test_loader), inds)
@@ -276,56 +328,83 @@ begin
         log_value(lg, "test_loss", L)
         @info "Test loss: $L"
         push!(Ls, ls)
-        if epoch % 10 == 0
-            save_model((H, RN2), save_dir * savename(args) * "$(epoch)eps")
-        end
+        # if epoch % 10 == 0
+        # save_model((H, RN2), save_dir * savename(args) * "$(epoch)eps")
+        # end
     end
 end
 
-# ## ====
-# L = vcat(Ls...)
-# plot(L)
-# plot(log.(1:length(L)), log.(L))
-# ## ===
-# inds = sample(1:args[:bsz], 6, replace=false)
-# p = plot_recs(sample_loader(test_loader), inds)
-# savefig(p, "plots/rec_optimum_eg0.png")
-# z = randn(args[:π], args[:bsz]) |> dev
+## ====
+L = vcat(Ls...)
+plot(L)
+plot(log.(1:length(L)), log.(L))
+## ===
 
-# @time patches, preds, full_out, errs, xys, z1s, zs, patches_t, Vxs = get_loop(z, x)
-# zz = cat(zs..., dims=3)
+z = randn(args[:π], args[:bsz]) |> dev
 
-# # recs = [sample_patch(x, xy, sampling_grid) for (x, xy) in zip(gpu(patches), gpu(xys))] |> cpu
-# # ind = 0
+@time patches, preds, full_out, errs, xys, z1s, zs, patches_t, Vxs = get_loop(z, x)
+zz = cat(zs..., dims=3)
 
-# # sem(x; dims=1) = std(x, dims=dims) / sqrt(size(x, dims))
+using LaTeXStrings
+ind = 0
+p1 = begin
+    ind = mod(ind + 1, 64) + 1
 
-# # begin
-# #     ind = mod(ind + 1, 64) + 1
-# #     plot_tings(x, y) =
-# #         let
-# #             p1 = plot_digit(x, c=:grays)
-# #             plot_digit!(y, alpha=0.3, c=:grays)
-# #             p1
-# #         end
-# #     p1 = [plot_tings(rec[:, :, 1, ind], cpu(x)[:, :, ind]) for rec in recs]
-# #     plot(p1...)
-# # end
+    pp = plot([plot_digit(reshape(x[:, ind], 28, 28), c=:jet, clim=(0, 1), colorbar=true) for x in patches]..., title="predictions", titlefontsize=10)
+    # pe = plot([plot_digit(reshape(x[:, ind] .^ 2, 28, 28), c=:jet, clim=(0, 1), colorbar=true) for x in errs]..., title="patches", titlefontsize=10)
+    pe = plot([plot_digit(reshape(x[:, ind], 28, 28), c=:jet, clim=(0, 1), colorbar=true) for x in patches_t]..., title="patches", titlefontsize=10)
+    # 
+    p1 = plot(pp, pe, layout=(2, 1))
+    # 
+    px = plot_digit(reshape(cpu(x)[:, :, ind], 28, 28))
+    pout = plot_digit(preds[end][:, :, 1, ind])
+    pz = plot(zz[:, ind, :]', legend=false, title=L"z^2")
+    cc = heatmap(cor(zz[:, ind, :]), clim=(0, 1))
+    plot(plot(px, pout,), p1, plot(pz, cc), layout=(3, 1), size=(600, 900))
+end
 
-# # # patches_t[1]
-# using LaTeXStrings
-# # ind = 0
-# p1 = begin
-#     ind = mod(ind + 1, 64) + 1
-#     pp = plot([plot_digit(reshape(x[:, :, 1, ind], 28, 28), c=:jet, boundc=false, colorbar=true) for x in recs]...)
-#     # pp = plot([plot_digit(reshape(x[:, ind], 28, 28), c=:jet, clim=(0, 1), colorbar=true) for x in patches]..., title="predictions", titlefontsize=10)
-#     pe = plot([plot_digit(reshape(x[:, ind], 28, 28), c=:jet, clim=(0, 1), colorbar=true) for x in patches_t]..., title="patches", titlefontsize=10)
-#     # 
-#     p1 = plot(pp, pe, layout=(2, 1))
-#     # 
-#     px = plot_digit(reshape(cpu(x)[:, :, ind], 28, 28))
-#     pout = plot_digit(preds[end][:, :, 1, ind])
-#     pz = plot(zz[:, ind, :]', legend=false, title=L"z^2")
-#     cc = heatmap(cor(zz[:, ind, :]))
-#     plot(plot(px, pout,), p1, plot(pz, cc), layout=(3, 1), size=(600, 900))
-# end
+begin
+    p = [plot_digit(fullx[:, :, 1, ind]) for fullx in full_out]
+    plot(p...)
+end
+
+## =====
+begin
+    Zs = []
+    for (i, (x, y)) in enumerate(test_loader)
+        patches, preds, full_out, errs, xys, z1s, zs, patches_t, Vxs = get_loop(z, x)
+        push!(Zs, zs)
+    end
+end
+zs[end]
+
+Zs[1]
+
+a = [[z[i] for (i, z) in enumerate(Z)] for Z in Zs]
+a[1]
+Zs[1]
+
+a = [[z[i] for z in Zs] for i in 1:6]
+
+a[1][1]
+
+a[1]
+a[end][1]
+
+b = permutedims(cat(a[end]..., dims=3), [2, 3, 1])
+
+c = flatten(b)'
+# c = reshape(b, 32, :)
+C = c[:, 1:960]
+
+using TSne
+
+Y = tsne(C')
+Ys = [Flux.onecold(cpu(y), 0:9) for (x, y) in test_loader]
+ys = vcat(Ys...)
+
+y_ = ys[1:960]
+
+scatter(Y[:, 1], Y[:, 2], c=y_)
+
+

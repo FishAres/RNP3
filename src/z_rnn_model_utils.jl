@@ -154,7 +154,7 @@ function train_model(opt, ps, train_data; args=args, epoch=1, logger=nothing)
     for (i, (x, y)) in enumerate(train_data)
         loss, grad = withgradient(ps) do
             loss = model_loss(zs[i], x)
-            lg !== nothing && Zygote.ignore() do
+            logger !== nothing && Zygote.ignore() do
                 log_value(lg, "loss", loss)
             end
             loss + args[:λ] * norm(Flux.params(H))

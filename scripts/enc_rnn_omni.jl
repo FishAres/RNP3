@@ -9,6 +9,7 @@ using MLDatasets
 using IterTools: partition, iterated
 using Flux: batch, unsqueeze, flatten
 using Flux.Data: DataLoader
+using Random: shuffle
 using Plots
 using StatsBase: sample
 using ProgressMeter
@@ -40,16 +41,15 @@ dev = gpu
 
 ##=====
 
-train_digits, train_labels = MNIST(split=:train)[:]
-test_digits, test_labels = MNIST(split=:test)[:]
+all_chars = load("../Recur_generative/data/exp_pro/omniglot.jld2")
+xs = shuffle(vcat((all_chars[key] for key in keys(all_chars))...))
+x_batches = batch.(partition(xs, args[:bsz]))
 
-train_labels = Float32.(Flux.onehotbatch(train_labels, 0:9))
-test_labels = Float32.(Flux.onehotbatch(test_labels, 0:9))
+ntrain, ntest = 286, 15
+xs_train = flatten.(x_batches[1:ntrain] |> gpu)
+xs_test = flatten.(x_batches[ntrain+1:ntrain+ntest] |> gpu)
+x = xs_test[1]
 
-train_loader = DataLoader((train_digits |> dev, train_labels |> dev), batchsize=args[:bsz], shuffle=true, partial=false)
-test_loader = DataLoader((test_digits |> dev, test_labels |> dev), batchsize=args[:bsz], shuffle=true, partial=false)
-
-x, y = first(test_loader)
 ## ====
 dev = has_cuda() ? gpu : cpu
 
@@ -192,6 +192,38 @@ function plot_recs(x, inds; plot_seq=true)
     return plot(p...; layout=(length(inds), 1), size=(600, 800))
 end
 
+## ====
+function train_model(opt, ps, train_data; args=args, epoch=1, logger=nothing)
+    progress_tracker = Progress(length(train_data), 1, "Training epoch $epoch :)")
+    losses = zeros(length(train_data))
+    # initial z's drawn from N(0,1)
+    zs = [randn(Float32, args[:π], args[:bsz]) for _ in 1:length(train_data)] |> gpu
+    for (i, x) in enumerate(train_data)
+        loss, grad = withgradient(ps) do
+            loss = model_loss(zs[i], x)
+            logger !== nothing && Zygote.ignore() do
+                log_value(lg, "loss", loss)
+            end
+            loss + args[:λ] * norm(Flux.params(H))
+        end
+        # foreach(x -> clamp!(x, -0.1f0, 0.1f0), grad)
+        Flux.update!(opt, ps, grad)
+        losses[i] = loss
+        ProgressMeter.next!(progress_tracker; showvalues=[(:loss, loss)])
+    end
+    return losses
+end
+
+function test_model(test_data)
+    zs = [randn(Float32, args[:π], args[:bsz]) for _ in 1:length(test_data)] |> gpu
+    L = 0.0f0
+    for (i, x) in enumerate(test_data)
+        L += model_loss(zs[i], x)
+    end
+    return L / length(test_data)
+end
+
+
 
 ## ======
 
@@ -232,18 +264,18 @@ ps = Flux.params(H, RN2)
 
 ## ======
 save_folder = "full_seq_tanh_v0"
-alias = "somewhat_faster"
+alias = "omni"
 save_dir = get_save_dir(save_folder, alias)
 
 ## =====
 
 inds = sample(1:args[:bsz], 6, replace=false)
-p = plot_recs(sample_loader(test_loader), inds)
+p = plot_recs(rand(xs_test), inds)
 
 ## =====
 
 args[:seqlen] = 6
-args[:scale_offset] = 2.6f0
+args[:scale_offset] = 2.2f0
 args[:δL] = round(Float32(1 / args[:seqlen]), digits=3)
 # args[:δL] = 0.0f0
 args[:λ] = 0.006f0
@@ -253,12 +285,12 @@ lg = new_logger(save_dir, args)
 
 begin
     Ls = []
-    for epoch in 21:40
-        ls = train_model(opt, ps, train_loader; epoch=epoch, logger=lg)
+    for epoch in 1:20
+        ls = train_model(opt, ps, xs_train; epoch=epoch, logger=lg)
         inds = sample(1:args[:bsz], 6, replace=false)
-        p = plot_recs(sample_loader(test_loader), inds)
+        p = plot_recs(rand(xs_test), inds)
         display(p)
-        L = test_model(test_loader)
+        L = test_model(xs_test)
         @info "Test loss: $L"
         push!(Ls, ls)
         if epoch % 50 == 0
@@ -272,37 +304,3 @@ L = vcat(Ls...)
 plot(L)
 plot(log.(1:length(L)), log.(L))
 # ## ===
-
-
-z = randn(args[:π], args[:bsz]) |> dev
-
-@time patches, preds, full_out, errs, xys, z1s, zs, patches_t, Vxs = get_loop(z, x)
-zz = cat(zs..., dims=3)
-
-using LaTeXStrings
-ind = 0
-p1 = begin
-    ind = mod(ind + 1, 64) + 1
-
-    pp = plot([plot_digit(reshape(x[:, ind], 28, 28), c=:jet, clim=(0, 1), colorbar=true) for x in patches]..., title="predictions", titlefontsize=10)
-    pe = plot([plot_digit(reshape(x[:, ind], 28, 28), c=:jet, clim=(0, 1), colorbar=true) for x in patches_t]..., title="patches", titlefontsize=10)
-    # 
-    p1 = plot(pp, pe, layout=(2, 1))
-    # 
-    px = plot_digit(reshape(cpu(x)[:, :, ind], 28, 28))
-    pout = plot_digit(preds[end][:, :, 1, ind])
-    pz = plot(zz[:, ind, :]', legend=false, title=L"z^2")
-    cc = heatmap(cor(zz[:, ind, :]))
-    plot(plot(px, pout,), p1, plot(pz, cc), layout=(3, 1), size=(600, 900))
-end
-
-out = full_sequence(gpu(zs[1]), x)
-plot_digit(cpu(out[:, :, 1, 3]))
-
-begin
-    # p = [heatmap(cor(Vx[:, :, ind])) for Vx in Vxs]
-    p = [heatmap(Vx[:, :, ind]) for Vx in Vxs]
-    plot(p...)
-end
-
-p
