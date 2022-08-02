@@ -90,3 +90,10 @@ function sample_patch(x, transformed_grid; sz=args[:img_size])
     x = reshape(x, sz..., 1, size(x)[end])
     grid_sample(x, tg; padding_mode=:zeros)
 end
+
+
+Zygote.@nograd function zoom_in2d(x, xy, sampling_grid; args=args)
+    inv_grid = get_inv_grid(sampling_grid, xy)
+    out_inv = sample_patch(x, inv_grid)
+    out_inv
+end

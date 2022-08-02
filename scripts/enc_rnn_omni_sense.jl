@@ -223,7 +223,7 @@ end
 
 
 ## ======
-
+args[:π] = 64
 Vx_sz = (args[:π], args[:π],)
 Va_sz = (args[:asz], args[:asz],)
 
@@ -272,7 +272,7 @@ save_dir = get_save_dir(save_folder, alias)
 ## =====
 
 args[:seqlen] = 7
-args[:scale_offset] = 2.4f0
+args[:scale_offset] = 2.2f0
 args[:δL] = round(Float32(1 / args[:seqlen]), digits=3)
 # args[:δL] = 0.0f0
 args[:λ] = 0.006f0
@@ -290,7 +290,9 @@ begin
         inds = sample(1:args[:bsz], 6, replace=false)
         p = plot_recs(rand(xs_test), inds)
         display(p)
+        log_image(lg, "recs_$(epoch)", p)
         L = test_model(xs_test)
+        log_value(lg, "test loss", L)
         @info "Test loss: $L"
         push!(Ls, ls)
         if epoch % 50 == 0
