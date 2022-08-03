@@ -26,7 +26,7 @@ function full_sequence(z)
     x̂ = Dec_z_x̂(z1)
     out = sample_patch(x̂, a1, sampling_grid)
     for t in 2:args[:seqlen]
-        z1, a1 = forward_pass(models, z0, a0)
+        z1, a1 = forward_pass(models, z1, a1)
         x̂ = Dec_z_x̂(z1)
         out += sample_patch(x̂, a1, sampling_grid)
     end
@@ -49,7 +49,7 @@ function model_loss(x)
     out2 = sample_patch(out1, a1, sampling_grid)
     L2 = Flux.mse(flatten(x̂), flatten(patch_t))
     for t in 2:args[:seqlen]
-        z1, a1 = forward_pass(models, z0, a0)
+        z1, a1 = forward_pass(models, z1, a1)
         x̂ = Dec_z_x̂(z1)
         out1 = full_sequence(z1)
         out2 += sample_patch(out1, a1, sampling_grid)
@@ -83,7 +83,7 @@ function get_loop(x)
     push_to_arrays!((out1, out2, a1, z1, patch_t), outputs)
 
     for t in 2:args[:seqlen]
-        z1, a1 = forward_pass(models, z0, a0)
+        z1, a1 = forward_pass(models, z1, a1)
         x̂ = Dec_z_x̂(z1)
         out1 = full_sequence(z1)
         out2 += sample_patch(out1, a1, sampling_grid)

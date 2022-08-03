@@ -8,7 +8,7 @@ function get_inv(thetas; scale_offset=args[:scale_offset])
     return Ainv, bs
 end
 
-Zygote.@nograd function zoom_in2d(x, xy, sampling_grid; args=args)
+function zoom_in2d(x, xy, sampling_grid; args=args)
     # dev = isa(x, CuArray) ? gpu : cpu
 
     # tr_grid = grid_generator_3d(sampling_grid, xy)

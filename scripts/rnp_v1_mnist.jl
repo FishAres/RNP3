@@ -105,6 +105,8 @@ Hx = Chain(
     LayerNorm(64, elu),
     Dense(64, 64),
     LayerNorm(64, elu),
+    Dense(64, 64),
+    LayerNorm(64, elu),
     Split(
         [Dense(64, θ, bias=false) for θ in model_bounds_x]...,
         Dense(64, args[:π], elu), # init z0
@@ -117,21 +119,27 @@ Ha = Chain(
     LayerNorm(64, elu),
     Dense(64, 64),
     LayerNorm(64, elu),
+    Dense(64, 64),
+    LayerNorm(64, elu),
     Split(
         [Dense(64, θ, bias=false) for θ in model_bounds_a]...,
-        Dense(64, args[:asz], cos), # init a0
+        Dense(64, args[:asz], sin), # init a0
     )
 ) |> gpu
 
 ps = Flux.params(Encoder, Hx, Ha)
 ## =====
+inds = sample(1:args[:bsz], 6, replace=false)
+p = plot_recs(sample_loader(test_loader), inds)
+
+## =====
 
 args[:λ] = 0.00f0
 args[:λ2] = 0.25f0
-args[:scale_offset] = 2.0f0
+args[:scale_offset] = 1.2f0
 lg = nothing
 
-opt = ADAM(1e-4)
+opt = ADAM(1e-3)
 begin
     Ls = []
     for epoch in 1:20
@@ -154,7 +162,7 @@ loss, grad = withgradient(ps) do
     Lout, L2 = model_loss(x)
     Lout + args[:λ2] * L2
 end
-
+grad.grads
 
 ## ====
 
