@@ -34,7 +34,7 @@ args = Dict(
 
 ## =====
 
-device!(0)
+device!(1)
 
 dev = gpu
 
@@ -59,44 +59,44 @@ const ones_vec = ones(1, 1, args[:bsz]) |> dev
 const zeros_vec = zeros(1, 1, args[:bsz]) |> dev
 const diag_vec = [[1.0f0 0.0f0; 0.0f0 1.0f0] for _ in 1:args[:bsz]] |> dev
 const diag_mat = cat(diag_vec..., dims=3) |> dev
-
 ## =====
 
 function get_models(θs, model_bounds; args=args, init_zs=true)
-    inds = init_zs ? [0; cumsum([model_bounds...; args[:π]; args[:asz]])] : [0; cumsum(model_bounds)]
+    inds = Zygote.ignore() do
+        init_zs ? [0; cumsum([model_bounds...; args[:π]; args[:asz]])] : [0; cumsum(model_bounds)]
+    end
 
     Θ = [θs[inds[i]+1:inds[i+1], :] for i in 1:length(inds)-1]
 
-    Vx = reshape(Θ[1], args[:π], args[:π], args[:bsz])
-    Va = reshape(Θ[2], args[:asz], args[:asz], args[:bsz])
+    f_state = ps_to_RN(get_rn_θs(Θ[1], args[:π], args[:π]); f_out=elu)
+    f_policy = ps_to_RN(get_rn_θs(Θ[2], args[:π], args[:π]); f_out=elu)
+    err_rnn = ps_to_RN(get_rn_θs(Θ[3], args[:π], args[:π]); f_out=elu)
 
-    Enc_za_z = Chain(HyDense(args[:π] + args[:asz], args[:π], Θ[3], tanh), flatten)
-    Enc_za_a = Chain(HyDense(args[:π] + args[:asz], args[:asz], Θ[4], tanh), flatten)
+    Enc_za_z = Chain(HyDense(args[:π] + args[:asz], args[:π], Θ[4], elu), flatten)
+    Enc_za_a = Chain(HyDense(args[:π] + args[:asz], args[:π], Θ[5], elu), flatten)
 
-    Enc_ϵ_z = Chain(HyDense(784, args[:π], Θ[5], tanh), flatten)
-    err_rnn = ps_to_RN(get_rn_θs(Θ[6], args[:π], args[:π]); f_out=gelu)
+    Enc_ϵ_z = Chain(HyDense(784, args[:π], Θ[6], elu), flatten)
+
     Dec_z_x̂ = Chain(HyDense(args[:π], 784, Θ[7], relu6), flatten)
 
-    Dec_z_a = Chain(HyDense(args[:asz], args[:asz], Θ[8],), flatten)
+    Dec_z_a = Chain(HyDense(args[:π], args[:asz], Θ[8], sin), flatten)
 
     z0 = Θ[9]
     a0 = Θ[10]
 
-    return (Vx, Va, Enc_za_z, Enc_za_a, Enc_ϵ_z, err_rnn, Dec_z_x̂, Dec_z_a), z0, a0
+    return (f_state, f_policy, err_rnn, Enc_za_z, Enc_za_a, Enc_ϵ_z, Dec_z_x̂, Dec_z_a), z0, a0
 end
-
-"nonlinear transition"
-Δa(a, Va, Dec_z_a) = sin.(Dec_z_a(gelu.(bmul(a, Va))))
 
 "todo: calculate error outside gradient"
 function forward_pass(z1, a1, models, x)
-    Vx, Va, Enc_za_z, Enc_za_a, Enc_ϵ_z, err_rnn, Dec_z_x̂, Dec_z_a = models
+    f_state, f_policy, err_rnn, Enc_za_z, Enc_za_a, Enc_ϵ_z, Dec_z_x̂, Dec_z_a = models
 
     za = vcat(z1, a1)
     ez = Enc_za_z(za)
     ea = Enc_za_a(za)
-    z1 = gelu.(bmul(ez, Vx)) # nonlinear transition
-    a1 = Δa(ea, Va, Dec_z_a)
+    z1 = f_state(ez)
+    a1 = Dec_z_a(f_policy(ea))
+
     x̂ = Dec_z_x̂(z1)
     patch_t = zoom_in2d(x, a1, sampling_grid) |> flatten
     ϵ = patch_t .- x̂
@@ -110,7 +110,7 @@ end
 function full_sequence(z::AbstractArray, x; args=args, model_bounds=model_bounds)
     θs = H(z)
     models, z0, a0 = get_models(θs, model_bounds)
-    Vx, Va, Enc_za_z, Enc_za_a, Enc_ϵ_z, err_rnn, Dec_z_x̂, Dec_z_a = models
+    f_state, f_policy, err_rnn, Enc_za_z, Enc_za_a, Enc_ϵ_z, Dec_z_x̂, Dec_z_a = models
     # is z0, a0 necessary?
     z1, a1, x̂, patch_t, ϵ, Δz = forward_pass(z0, a0, models, x)
     err_emb = err_rnn(Δz) # update error embedding
@@ -124,7 +124,7 @@ function full_sequence(z::AbstractArray, x; args=args, model_bounds=model_bounds
 end
 
 function full_sequence(models::Tuple, z0, a0, x; args=args, model_bounds=model_bounds)
-    Vx, Va, Enc_za_z, Enc_za_a, Enc_ϵ_z, err_rnn, Dec_z_x̂, Dec_z_a = models
+    f_state, f_policy, err_rnn, Enc_za_z, Enc_za_a, Enc_ϵ_z, Dec_z_x̂, Dec_z_a = models
     # is z0, a0 necessary?
     z1, a1, x̂, patch_t, ϵ, Δz = forward_pass(z0, a0, models, x)
     err_emb = err_rnn(Δz) # update error embedding
@@ -137,45 +137,32 @@ function full_sequence(models::Tuple, z0, a0, x; args=args, model_bounds=model_b
     return out, err_emb
 end
 
-
 function model_loss(z, x; args=args, model_bounds=model_bounds)
     Flux.reset!(RN2)
     θs = H(z)
     models, z0, a0 = get_models(θs, model_bounds)
-    Vx, Va, Enc_za_z, Enc_za_a, Enc_ϵ_z, err_rnn, Dec_z_x̂, Dec_z_a = models
     # is z0, a0 necessary?
     z1, a1, x̂, patch_t, ϵ, Δz = forward_pass(z0, a0, models, x)
     out_1, err_emb_1 = full_sequence(z1, patch_t)
     out_full, err_emb_full = full_sequence(models, z0, a0, x)
-    # out1 = sample_patch(out_1, a1, sampling_grid)
+
     Lpatch = Flux.mse(flatten(x̂), flatten(patch_t))
     Lfull = Flux.mse(flatten(out_full), flatten(x))
     for t = 2:args[:seqlen]
         z = RN2(err_emb_1)
         θs = H(z)
         models, z0, a0 = get_models(θs, model_bounds)
-        Vx, Va, Enc_za_z, Enc_za_a, Enc_ϵ_z, err_rnn, Dec_z_x̂, Dec_z_a = models
         out_full, err_emb_full = full_sequence(models, z0, a0, x)
-
         z1, a1, x̂, patch_t, ϵ, Δz = forward_pass(z1, a1, models, x)
         out_1, err_emb_1 = full_sequence(z1, patch_t)
-
-        # out1 += sample_patch(out_1, a1, sampling_grid)
 
         Lpatch += Flux.mse(flatten(x̂), flatten(patch_t))
         Lfull += Flux.mse(flatten(out_full), flatten(x))
     end
-    # rec_loss = Flux.mse(flatten(out1), flatten(x))
+
     local_loss = args[:δL] * Lpatch
     return local_loss + args[:λf] * Lfull
 end
-
-Zygote.@nograd function push_to_arrays!(outputs, arrays)
-    for (output, array) in zip(outputs, arrays)
-        push!(array, cpu(output))
-    end
-end
-
 
 function get_loop(z, x; args=args, model_bounds=model_bounds)
     outputs = patches, recs, errs, zs, patches_t = [], [], [], [], [], []
@@ -185,9 +172,8 @@ function get_loop(z, x; args=args, model_bounds=model_bounds)
     Vx, Va, Enc_za_z, Enc_za_a, Enc_ϵ_z, err_rnn, Dec_z_x̂, Dec_z_a = models
     # is z0, a0 necessary?
     z1, a1, x̂, patch_t, ϵ, Δz = forward_pass(z0, a0, models, x)
-
     out_full, err_emb_full = full_sequence(models, z0, a0, x)
-    # out_full, err_emb_full = full_sequence(z, x)
+
     out_1, err_emb_1 = full_sequence(z1, patch_t)
     out = sample_patch(out_full, a1, sampling_grid)
 
@@ -199,7 +185,6 @@ function get_loop(z, x; args=args, model_bounds=model_bounds)
         models, z0, a0 = get_models(θs, model_bounds)
         Vx, Va, Enc_za_z, Enc_za_a, Enc_ϵ_z, err_rnn, Dec_z_x̂, Dec_z_a = models
         out_full, err_emb_full = full_sequence(models, z0, a0, x)
-        # out_full, err_emb_full = full_sequence(z, x)
         z1, a1, x̂, patch_t, ϵ, Δz = forward_pass(z1, a1, models, x)
         out_1, err_emb_1 = full_sequence(z1, patch_t)
         out += sample_patch(out_1, a1, sampling_grid)
@@ -208,36 +193,23 @@ function get_loop(z, x; args=args, model_bounds=model_bounds)
     return outputs
 end
 
-function plot_recs(x, inds; plot_seq=true)
-    z = randn(Float32, args[:π], args[:bsz]) |> gpu
-
-    patches, preds, errs, xys, zs = get_loop(z, x)
-    p = plot_seq ? let
-        patches_ = map(x -> reshape(x, 28, 28, 1, size(x)[end]), patches)
-        # [plot_rec(preds[end], x, preds, ind) for ind in inds]
-        [plot_rec(preds[end], x, patches_, ind) for ind in inds]
-    end : [plot_rec(preds[end], x, ind) for ind in inds]
-
-    return plot(p...; layout=(length(inds), 1), size=(600, 800))
-end
-
 
 ## =====
-
-
-Vx_sz = (args[:π], args[:π],)
-Va_sz = (args[:asz], args[:asz],)
-
-l_enc = 784 * args[:π] + args[:π] # encoder ϵ -> z, with bias
-l_err_rnn = get_rnn_θ_sizes(args[:π], args[:π])
+l_fx = get_rnn_θ_sizes(args[:π], args[:π])
+l_fa = get_rnn_θ_sizes(args[:π], args[:π]) # same size for now
+l_err_rnn = get_rnn_θ_sizes(args[:π], args[:π]) # also same size lol
 
 l_dec_x = 784 * args[:π] # decoder z -> x̂, no bias
-l_dec_a = args[:asz] * args[:asz] + args[:asz] # decoder z -> a, with bias
+l_dec_a = args[:asz] * args[:π] + args[:asz] # decoder z -> a, with bias
+
+l_enc_e_z = (784 + 1) * args[:π]
 
 l_enc_za_z = (args[:π] + args[:asz]) * args[:π] # encoder (z_t, a_t) -> z_t+1
-l_enc_za_a = (args[:π] + args[:asz]) * args[:asz] # encoder (z_t, a_t) -> a_t+1
+l_enc_za_a = (args[:π] + args[:asz]) * args[:π] # encoder (z_t, a_t) -> a_t+1
 
-model_bounds = [map(sum, (prod(Vx_sz), prod(Va_sz),))...; l_enc_za_z; l_enc_za_a; l_enc; l_err_rnn; l_dec_x; l_dec_a]
+model_bounds = [l_fx; l_fa; l_err_rnn; l_enc_za_z; l_enc_za_a; l_enc_e_z; l_dec_x; l_dec_a]
+
+## =====
 
 lθ = sum(model_bounds)
 println(lθ, " parameters for primary")
@@ -245,13 +217,13 @@ println(lθ, " parameters for primary")
 H = Chain(
     LayerNorm(args[:π],),
     Dense(args[:π], 64),
-    LayerNorm(64, gelu),
+    LayerNorm(64, elu),
     Dense(64, 64),
-    LayerNorm(64, gelu),
+    LayerNorm(64, elu),
     Dense(64, 64),
-    LayerNorm(64, gelu),
+    LayerNorm(64, elu),
     Dense(64, 64),
-    LayerNorm(64, gelu),
+    LayerNorm(64, elu),
     Dense(64, lθ + args[:π] + args[:asz], bias=false),
 ) |> gpu
 
@@ -259,37 +231,35 @@ println("# hypernet params: $(sum(map(prod, size.(Flux.params(H)))))")
 
 RN2 = Chain(
     Dense(args[:π], 64),
-    LayerNorm(64, gelu),
+    LayerNorm(64, elu),
     GRU(64, 64),
-    Dense(64, args[:π], gelu),
+    Dense(64, args[:π], elu),
 ) |> gpu
 
 ps = Flux.params(H, RN2)
 
-## ====
+## =====
 
-modelpath = "saved_models/enc_rnn_2l2v2l/2level_1st_attempt/add_offset=true_asz=6_bsz=64_esz=32_scale_offset=2.0_seqlen=4_δL=0.25_λ=0.006_λf=0.167_π=32.bson"
-
-H, RN2 = load(modelpath)[:model] |> gpu
-
-## ====
+# model_loss(z, x)
+## =====
 
 save_folder = "enc_rnn_2l2v2l"
-alias = "2level_1st_attempt"
+alias = "fx_fa_fe_rnns_v01"
 save_dir = get_save_dir(save_folder, alias)
+
 
 ## =====
 
-inds = sample(1:args[:bsz], 6, replace=false)
-p = plot_recs(sample_loader(test_loader), inds)
+# inds = sample(1:args[:bsz], 6, replace=false)
+# p = plot_recs(sample_loader(test_loader), inds)
+## =====
 
-
-## ====
 
 args[:seqlen] = 4
 args[:scale_offset] = 2.0f0
-args[:δL] = round(Float32(1 / args[:seqlen]), digits=3)
-# args[:δL] = 0.0f0
+# args[:δL] = round(Float32(1 / args[:seqlen]), digits=3)
+args[:δL] = 0.0f0
+args[:λf] = 1.0f0
 args[:λ] = 0.006f0
 opt = ADAM(1e-4)
 lg = new_logger(save_dir, args)
@@ -297,8 +267,10 @@ lg = new_logger(save_dir, args)
 
 begin
     Ls = []
-    for epoch in 1:20
-
+    for epoch in 1:200
+        if epoch % 20 == 0
+            opt.eta = 0.8 * opt.eta
+        end
         ls = train_model(opt, ps, train_loader; epoch=epoch, logger=lg)
         inds = sample(1:args[:bsz], 6, replace=false)
         p = plot_recs(sample_loader(test_loader), inds)
@@ -308,40 +280,8 @@ begin
         log_value(lg, "test_loss", L)
         @info "Test loss: $L"
         push!(Ls, ls)
-
+        if epoch % 10 == 0
+            save_model((H, RN2), joinpath(save_folder, alias, savename(args) * "_$(epoch)eps"))
+        end
     end
-end
-## =====
-
-
-function model_loss(z, x; args=args, model_bounds=model_bounds)
-    Flux.reset!(RN2)
-    θs = H(z)
-    models, z0, a0 = get_models(θs, model_bounds)
-    Vx, Va, Enc_za_z, Enc_za_a, Enc_ϵ_z, err_rnn, Dec_z_x̂, Dec_z_a = models
-    # is z0, a0 necessary?
-    z1, a1, x̂, patch_t, ϵ, Δz = forward_pass(z0, a0, models, x)
-    out_1, err_emb_1 = full_sequence(z1, patch_t)
-    out_full, err_emb_full = full_sequence(models, z0, a0, x)
-
-    Lpatch = Flux.mse(flatten(x̂), flatten(patch_t))
-    Lfull = Flux.mse(flatten(out_full), flatten(x))
-    for t = 2:args[:seqlen]
-        z = RN2(err_emb_1)
-
-        models, z0, a0 = get_models(θs, model_bounds)
-        Vx, Va, Enc_za_z, Enc_za_a, Enc_ϵ_z, err_rnn, Dec_z_x̂, Dec_z_a = models
-        out_full, err_emb_full = full_sequence(models, z0, a0, x)
-
-        z1, a1, x̂, patch_t, ϵ, Δz = forward_pass(z1, a1, models, x)
-        out_1, err_emb_1 = full_sequence(z1, patch_t)
-
-        # out1 += sample_patch(out_1, a1, sampling_grid)
-
-        Lpatch += Flux.mse(flatten(x̂), flatten(patch_t))
-        Lfull += Flux.mse(flatten(out_full), flatten(x))
-    end
-    # rec_loss = Flux.mse(flatten(out1), flatten(x))
-    local_loss = args[:δL] * Lpatch
-    return local_loss + args[:λf] * Lfull
 end

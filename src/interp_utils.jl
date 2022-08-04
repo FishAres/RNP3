@@ -67,15 +67,29 @@ function grid_generator_fast(sampling_grid_2d, thetas; scale_offset=args[:scale_
     return batched_mul(A, sampling_grid_2d) .+ unsqueeze(b, 2)
 end
 
+# @inline function get_inv_grid2(sampling_grid_2d, thetas; scale_offset=args[:scale_offset])
+#     A_rot, A_s, A_shear, b = get_affine_mats(thetas; scale_offset=scale_offset)
+#     sh_inv = cat(map(inv, eachslice(cpu(A_shear), dims=3))..., dims=3)
+#     sc_inv = cat(map(inv, eachslice(cpu(A_s) .+ 1.0f-5, dims=3))..., dims=3)
+#     rot_inv = cat(map(inv, eachslice(cpu(A_rot), dims=3))..., dims=3)
+#     Ainv = batched_mul(batched_mul(sc_inv, sh_inv), rot_inv) |> gpu
+#     # Ainv = mul(sc_inv, sh_inv, rot_inv) |> gpu
+#     return batched_mul(Ainv, (sampling_grid_2d .- unsqueeze(b, 2)))
+# end
+
 @inline function get_inv_grid(sampling_grid_2d, thetas; scale_offset=args[:scale_offset])
     A_rot, A_s, A_shear, b = get_affine_mats(thetas; scale_offset=scale_offset)
-    sh_inv = cat(map(inv, eachslice(cpu(A_shear), dims=3))..., dims=3)
-    sc_inv = cat(map(inv, eachslice(cpu(A_s) .+ 1.0f-5, dims=3))..., dims=3)
-    rot_inv = cat(map(inv, eachslice(cpu(A_rot), dims=3))..., dims=3)
-    Ainv = batched_mul(batched_mul(sc_inv, sh_inv), rot_inv) |> gpu
+    A = batched_mul(batched_mul(A_rot, A_shear), A_s)
+    # sh_inv = cat(map(inv, eachslice(cpu(A_shear), dims=3))..., dims=3)
+    # sc_inv = cat(map(inv, eachslice(cpu(A_s) .+ 1.0f-5, dims=3))..., dims=3)
+    # rot_inv = cat(map(inv, eachslice(cpu(A_rot), dims=3))..., dims=3)
+    # Ainv = batched_mul(batched_mul(sc_inv, sh_inv), rot_inv) |> gpu
+    Ainv = cat(map(inv, eachslice(cpu(A), dims=3))..., dims=3) |> gpu
     # Ainv = mul(sc_inv, sh_inv, rot_inv) |> gpu
     return batched_mul(Ainv, (sampling_grid_2d .- unsqueeze(b, 2)))
 end
+
+
 
 function sample_patch(x, thetas, sampling_grid; sz=args[:img_size])
     grid = grid_generator_3d(sampling_grid, thetas)
