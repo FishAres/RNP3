@@ -10,7 +10,9 @@ using IterTools: partition, iterated
 using Flux: batch, unsqueeze, flatten
 using Flux.Data: DataLoader
 using Plots
+using Distributions
 using StatsBase: sample
+using Random: shuffle
 using ProgressMeter
 using ProgressMeter: Progress
 
@@ -34,22 +36,21 @@ args = Dict(
 
 ## =====
 
-device!(0)
+device!(1)
 
 dev = gpu
 
 ##=====
 
-train_digits, train_labels = MNIST(split=:train)[:]
-test_digits, test_labels = MNIST(split=:test)[:]
+all_chars = load("../Recur_generative/data/exp_pro/omniglot.jld2")
+xs = shuffle(vcat((all_chars[key] for key in keys(all_chars))...))
+x_batches = batch.(partition(xs, args[:bsz]))
 
-train_labels = Float32.(Flux.onehotbatch(train_labels, 0:9))
-test_labels = Float32.(Flux.onehotbatch(test_labels, 0:9))
+ntrain, ntest = 286, 15
+xs_train = flatten.(x_batches[1:ntrain] |> gpu)
+xs_test = flatten.(x_batches[ntrain+1:ntrain+ntest] |> gpu)
+x = xs_test[1]
 
-train_loader = DataLoader((train_digits |> dev, train_labels |> dev), batchsize=args[:bsz], shuffle=true, partial=false)
-test_loader = DataLoader((test_digits |> dev, test_labels |> dev), batchsize=args[:bsz], shuffle=true, partial=false)
-
-x, y = first(test_loader)
 ## ====
 dev = has_cuda() ? gpu : cpu
 
@@ -81,8 +82,8 @@ function get_models(θs, model_bounds; args=args, init_zs=true)
 
     Dec_z_a = Chain(HyDense(args[:π], args[:asz], Θ[8], sin), flatten)
 
-    z0 = Θ[9]
-    a0 = Θ[10]
+    z0 = elu.(Θ[9])
+    a0 = sin.(Θ[10])
 
     return (f_state, f_policy, err_rnn, Enc_za_z, Enc_za_a, Enc_ϵ_z, Dec_z_x̂, Dec_z_a), z0, a0
 end
@@ -193,8 +194,53 @@ function get_loop(z, x; args=args, model_bounds=model_bounds)
     return outputs
 end
 
+function train_model(opt, ps, train_data; args=args, epoch=1, logger=nothing)
+    progress_tracker = Progress(length(train_data), 1, "Training epoch $epoch :)")
+    losses = zeros(length(train_data))
+    # initial z's drawn from N(0,1)
+    zs = [rand(Uniform(-1.0f0, 1.0f0), args[:π], args[:bsz]) for _ in 1:length(train_data)] |> gpu
+    for (i, x) in enumerate(train_data)
+        loss, grad = withgradient(ps) do
+            loss = model_loss(zs[i], x)
+            logger !== nothing && Zygote.ignore() do
+                log_value(lg, "loss", loss)
+            end
+            loss + args[:λ] * norm(Flux.params(H))
+        end
+        # foreach(x -> clamp!(x, -0.1f0, 0.1f0), grad)
+        Flux.update!(opt, ps, grad)
+        losses[i] = loss
+        ProgressMeter.next!(progress_tracker; showvalues=[(:loss, loss)])
+    end
+    return losses
+end
+
+function test_model(test_data)
+    zs = [rand(Uniform(-1.0f0, 1.0f0), args[:π], args[:bsz]) for _ in 1:length(test_data)] |> gpu
+    L = 0.0f0
+    for (i, x) in enumerate(test_data)
+        L += model_loss(zs[i], x)
+    end
+    return L / length(test_data)
+end
+
+function plot_recs(x, inds; plot_seq=true)
+    z = rand(Uniform(-1.0f0, 1.0f0), args[:π], args[:bsz]) |> gpu
+
+    patches, preds, errs, xys, zs = get_loop(z, x)
+    p = plot_seq ? let
+        patches_ = map(x -> reshape(x, 28, 28, 1, size(x)[end]), patches)
+        # [plot_rec(preds[end], x, preds, ind) for ind in inds]
+        [plot_rec(preds[end], x, patches_, ind) for ind in inds]
+    end : [plot_rec(preds[end], x, ind) for ind in inds]
+
+    return plot(p...; layout=(length(inds), 1), size=(600, 800))
+end
+
 
 ## =====
+
+args[:π] = 128
 l_fx = get_rnn_θ_sizes(args[:π], args[:π])
 l_fa = get_rnn_θ_sizes(args[:π], args[:π]) # same size for now
 l_err_rnn = get_rnn_θ_sizes(args[:π], args[:π]) # also same size lol
@@ -232,7 +278,7 @@ println("# hypernet params: $(sum(map(prod, size.(Flux.params(H)))))")
 RN2 = Chain(
     Dense(args[:π], 64),
     LayerNorm(64, elu),
-    GRU(64, 64),
+    LSTM(64, 64),
     Dense(64, args[:π], elu),
 ) |> gpu
 
@@ -244,19 +290,20 @@ ps = Flux.params(H, RN2)
 ## =====
 
 save_folder = "enc_rnn_2l2v2l"
-alias = "fx_fa_fe_rnns_v02_local_loss"
+alias = "fx_fa_fe_rnns_omni_v01"
 save_dir = get_save_dir(save_folder, alias)
 
 
 ## =====
 
-inds = sample(1:args[:bsz], 6, replace=false)
-p = plot_recs(sample_loader(test_loader), inds)
+# inds = sample(1:args[:bsz], 6, replace=false)
+# p = plot_recs(rand(xs_test), inds)
+
 ## =====
 
 args[:seqlen] = 5
 args[:glimpse_len] = 4
-args[:scale_offset] = 3.4f0
+args[:scale_offset] = 2.8f0
 args[:δL] = round(Float32(1 / args[:seqlen]), digits=3)
 # args[:δL] = 0.0f0
 args[:λf] = 1.0f0
@@ -271,16 +318,16 @@ begin
         if epoch % 20 == 0
             opt.eta = 0.8 * opt.eta
         end
-        ls = train_model(opt, ps, train_loader; epoch=epoch, logger=lg)
+        ls = train_model(opt, ps, xs_train; epoch=epoch, logger=lg)
         inds = sample(1:args[:bsz], 6, replace=false)
-        p = plot_recs(sample_loader(test_loader), inds)
+        p = plot_recs(rand(xs_test), inds)
         display(p)
         log_image(lg, "recs_$(epoch)", p)
-        L = test_model(test_loader)
+        L = test_model(xs_test)
         log_value(lg, "test_loss", L)
         @info "Test loss: $L"
         push!(Ls, ls)
-        if epoch % 10 == 0
+        if epoch % 25 == 0
             save_model((H, RN2), joinpath(save_folder, alias, savename(args) * "_$(epoch)eps"))
         end
     end
@@ -288,20 +335,25 @@ end
 
 ## =====
 
-z = randn(Float32, args[:π], args[:bsz]) |> gpu
-full_recs, patches, errs, zs, a1s, patches_t = get_loop(z, x)
+# z = randn(Float32, args[:π], args[:bsz]) |> gpu
+# full_recs, patches, errs, zs, a1s, patches_t = get_loop(z, x)
 
-ind = 0
-begin
-    ind = mod(ind + 1, args[:bsz]) + 1
-    # p = [plot_digit(reshape(patch[:, :, 1, ind], 28, 28)) for patch in patches]
-    p = [heatmap(reshape(patch[:, ind], 28, 28)) for patch in errs]
-    plot(p...)
-end
+# ind = 0
+# begin
+#     ind = mod(ind + 1, args[:bsz]) + 1
+#     # p = [plot_digit(reshape(patch[:, :, 1, ind], 28, 28)) for patch in patches]
+#     p = [heatmap(reshape(patch[:, ind], 28, 28)) for patch in errs]
+#     plot(p...)
+# end
 
-es = reshape(full_recs[2], 28, 28, 64)
-heatmap(es[:, :, 1])
+# es = reshape(full_recs[2], 28, 28, 64)
+# heatmap(es[:, :, 1])
 
-zz = cat(zs..., dims=3)
+# zz = cat(zs..., dims=3)
 
-plot(zz[:, 4, :]', legend=false)
+# plot(zz[:, 4, :]', legend=false)
+
+# xx = -10:0.1:10
+# plot(xx, sin.(xx))
+# plot!(xx, tanh.(xx))
+# plot!(xx, 2 .* (σ.(xx) .- 0.5))
