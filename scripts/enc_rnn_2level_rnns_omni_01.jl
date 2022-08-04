@@ -31,7 +31,7 @@ args = Dict(
     :bsz => 64, :img_size => (28, 28), :π => 32,
     :esz => 32, :add_offset => true, :fa_out => identity,
     :asz => 6, :glimpse_len => 4, :seqlen => 5, :λ => 1.0f-3, :δL => Float32(1 / 4),
-    :scale_offset => 0.0f0, :λf => 0.167f0
+    :scale_offset => 2.8f0, :λf => 0.167f0
 )
 
 ## =====
@@ -60,6 +60,10 @@ const ones_vec = ones(1, 1, args[:bsz]) |> dev
 const zeros_vec = zeros(1, 1, args[:bsz]) |> dev
 const diag_vec = [[1.0f0 0.0f0; 0.0f0 1.0f0] for _ in 1:args[:bsz]] |> dev
 const diag_mat = cat(diag_vec..., dims=3) |> dev
+
+const diag_offs = 1.0f-4 .* diag_vec
+
+const diag_off = cat(1.0f-6 .* diag_vec..., dims=3)
 ## =====
 
 function get_models(θs, model_bounds; args=args, init_zs=true)
@@ -283,10 +287,29 @@ RN2 = Chain(
 ) |> gpu
 
 ps = Flux.params(H, RN2)
-
 ## =====
 
-# model_loss(z, x)
+modelpath = "saved_models/enc_rnn_2l2v2l/fx_fa_fe_rnns_omni_v01/add_offset=true_asz=6_bsz=64_esz=32_glimpse_len=4_scale_offset=2.8_seqlen=5_δL=0.2_λ=0.006_λf=1.0_π=128_50eps.bson"
+
+H, RN2 = load(modelpath)[:model] |> gpu
+
+
+## =====
+z = randn(args[:π], args[:bsz]) |> gpu
+model_loss(z, x)
+
+thetas = rand(Uniform(-1.0f0, 1.0f0), 6, args[:bsz]) |> gpu
+
+A_rot, A_s, A_shear, b = get_affine_mats(thetas; scale_offset=args[:scale_offset])
+A = batched_mul(batched_mul(A_rot, A_shear), A_s)
+
+Ac = collect(eachslice(cpu(A), dims=3))
+
+sum(diag(a) .== 0 for a in Ac)
+
+diag_vec[1]
+
+
 ## =====
 
 save_folder = "enc_rnn_2l2v2l"
@@ -296,8 +319,8 @@ save_dir = get_save_dir(save_folder, alias)
 
 ## =====
 
-# inds = sample(1:args[:bsz], 6, replace=false)
-# p = plot_recs(rand(xs_test), inds)
+inds = sample(1:args[:bsz], 6, replace=false)
+p = plot_recs(rand(xs_test), inds)
 
 ## =====
 
@@ -335,16 +358,16 @@ end
 
 ## =====
 
-# z = randn(Float32, args[:π], args[:bsz]) |> gpu
-# full_recs, patches, errs, zs, a1s, patches_t = get_loop(z, x)
+z = randn(Float32, args[:π], args[:bsz]) |> gpu
+full_recs, patches, errs, zs, a1s, patches_t = get_loop(z, x)
 
-# ind = 0
-# begin
-#     ind = mod(ind + 1, args[:bsz]) + 1
-#     # p = [plot_digit(reshape(patch[:, :, 1, ind], 28, 28)) for patch in patches]
-#     p = [heatmap(reshape(patch[:, ind], 28, 28)) for patch in errs]
-#     plot(p...)
-# end
+ind = 0
+begin
+    ind = mod(ind + 1, args[:bsz]) + 1
+    # p = [plot_digit(reshape(patch[:, :, 1, ind], 28, 28)) for patch in patches_t]
+    p = [heatmap(reshape(patch[:, ind], 28, 28)) for patch in patches_t]
+    plot(p...)
+end
 
 # es = reshape(full_recs[2], 28, 28, 64)
 # heatmap(es[:, :, 1])
