@@ -28,13 +28,13 @@ CUDA.allowscalar(false)
 args = Dict(
     :bsz => 64, :img_size => (28, 28), :π => 32,
     :esz => 32, :add_offset => true, :fa_out => identity,
-    :asz => 6, :seqlen => 4, :λ => 1.0f-3, :δL => Float32(1 / 4),
+    :asz => 6, :glimpse_len => 4, :seqlen => 5, :λ => 1.0f-3, :δL => Float32(1 / 4),
     :scale_offset => 0.0f0, :λf => 0.167f0
 )
 
 ## =====
 
-device!(1)
+device!(0)
 
 dev = gpu
 
@@ -99,10 +99,10 @@ function forward_pass(z1, a1, models, x)
 
     x̂ = Dec_z_x̂(z1)
     patch_t = zoom_in2d(x, a1, sampling_grid) |> flatten
-    ϵ = patch_t .- x̂
-    # ϵ = Zygote.ignore() do
-    # patch_t .- x̂
-    # end
+    # ϵ = patch_t .- x̂
+    ϵ = Zygote.ignore() do
+        patch_t .- x̂
+    end
     Δz = Enc_ϵ_z(ϵ)
     return z1, a1, x̂, patch_t, ϵ, Δz
 end
@@ -148,7 +148,7 @@ function model_loss(z, x; args=args, model_bounds=model_bounds)
 
     Lpatch = Flux.mse(flatten(x̂), flatten(patch_t))
     Lfull = Flux.mse(flatten(out_full), flatten(x))
-    for t = 2:args[:seqlen]
+    for t = 2:args[:glimpse_len]
         z = RN2(err_emb_1)
         θs = H(z)
         models, z0, a0 = get_models(θs, model_bounds)
@@ -165,7 +165,7 @@ function model_loss(z, x; args=args, model_bounds=model_bounds)
 end
 
 function get_loop(z, x; args=args, model_bounds=model_bounds)
-    outputs = patches, recs, errs, zs, patches_t = [], [], [], [], [], []
+    outputs = patches, recs, errs, zs, as, patches_t = [], [], [], [], [], [], []
     Flux.reset!(RN2)
     θs = H(z)
     models, z0, a0 = get_models(θs, model_bounds)
@@ -175,11 +175,11 @@ function get_loop(z, x; args=args, model_bounds=model_bounds)
     out_full, err_emb_full = full_sequence(models, z0, a0, x)
 
     out_1, err_emb_1 = full_sequence(z1, patch_t)
-    out = sample_patch(out_full, a1, sampling_grid)
+    out = sample_patch(out_full .+ 0.1f0, a1, sampling_grid)
 
-    push_to_arrays!((out_full, out, ϵ, z, patch_t), outputs)
+    push_to_arrays!((out_full, out, ϵ, z, a1, patch_t), outputs)
 
-    for t = 2:args[:seqlen]
+    for t = 2:args[:glimpse_len]
         z = RN2(err_emb_1)
         θs = H(z)
         models, z0, a0 = get_models(θs, model_bounds)
@@ -187,8 +187,8 @@ function get_loop(z, x; args=args, model_bounds=model_bounds)
         out_full, err_emb_full = full_sequence(models, z0, a0, x)
         z1, a1, x̂, patch_t, ϵ, Δz = forward_pass(z1, a1, models, x)
         out_1, err_emb_1 = full_sequence(z1, patch_t)
-        out = sample_patch(out_1, a1, sampling_grid)
-        push_to_arrays!((out_full, out, ϵ, z, patch_t), outputs)
+        out += sample_patch(out_1 .+ 0.1f0, a1, sampling_grid)
+        push_to_arrays!((out_full, out, ϵ, z, a1, patch_t), outputs)
     end
     return outputs
 end
@@ -239,15 +239,12 @@ RN2 = Chain(
 ps = Flux.params(H, RN2)
 
 ## =====
-modelpath = "saved_models/enc_rnn_2l2v2l/fx_fa_fe_rnns_v01/add_offset=true_asz=6_bsz=64_esz=32_scale_offset=2.0_seqlen=4_δL=0.0_λ=0.006_λf=1.0_π=32_50eps.bson"
-
-H, RN2 = load(modelpath)[:model] |> gpu
 
 # model_loss(z, x)
 ## =====
 
 save_folder = "enc_rnn_2l2v2l"
-alias = "fx_fa_fe_rnns_v01"
+alias = "fx_fa_fe_rnns_v02"
 save_dir = get_save_dir(save_folder, alias)
 
 
@@ -257,9 +254,9 @@ inds = sample(1:args[:bsz], 6, replace=false)
 p = plot_recs(sample_loader(test_loader), inds)
 ## =====
 
-
-args[:seqlen] = 4
-args[:scale_offset] = 2.0f0
+args[:seqlen] = 5
+args[:glimpse_len] = 4
+args[:scale_offset] = 5.6f0
 # args[:δL] = round(Float32(1 / args[:seqlen]), digits=3)
 args[:δL] = 0.0f0
 args[:λf] = 1.0f0
@@ -270,7 +267,7 @@ lg = new_logger(save_dir, args)
 
 begin
     Ls = []
-    for epoch in 1:200
+    for epoch in 1:100
         if epoch % 20 == 0
             opt.eta = 0.8 * opt.eta
         end
@@ -291,15 +288,52 @@ end
 
 ## =====
 
+Flux.reset!(RN2)
+θs = H(z)
+models, z0, a0 = get_models(θs, model_bounds)
+f_state, f_policy, err_rnn, Enc_za_z, Enc_za_a, Enc_ϵ_z, Dec_z_x̂, Dec_z_a = models
+
+
+
+za = vcat(z0, a0)
+ez = Enc_za_z(za)
+ea = Enc_za_a(za)
+z1 = f_state(ez)
+a1 = Dec_z_a(f_policy(ea))
+aa = f_policy(ea)
+a = Dec_z_a.layers[1]
+
+heatmap(flatten(cpu(a(aa))))
+
+bmul(a.weight, aa)
+
+
+
+heatmap(sin.(cpu(a1)))
+
+x̂ = Dec_z_x̂(z1)
+
+
+f_policy()
+
+
+
 z = randn(Float32, args[:π], args[:bsz]) |> gpu
-full_recs, patches, errs, zs, patches_t = get_loop(z, x)
+full_recs, patches, errs, zs, a1s, patches_t = get_loop(z, x)
+heatmap(a1s[1])
 
-plot_digit(patches[1][:, :, 1, 1])
 
-patches_t
-errs
-es = reshape(patches_t[4], 28, 28, 64)
-heatmap(es[:, :, 4])
+
+ind = 0
+begin
+    ind = mod(ind + 1, args[:bsz]) + 1
+    # p = [plot_digit(reshape(patch[:, :, 1, 10]), 28, 28) for patch in patches_t]
+    p = [plot_digit(reshape(patch[:, ind], 28, 28)) for patch in patches_t]
+    plot(p...)
+end
+
+es = reshape(full_recs[2], 28, 28, 64)
+heatmap(es[:, :, 1])
 
 zz = cat(zs..., dims=3)
 

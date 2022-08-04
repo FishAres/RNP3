@@ -100,7 +100,7 @@ function (m::HyDense)(x::AbstractArray)
     σ = NNlib.fast_act(m.σ, x)  # replaces tanh => tanh_fast, etc
     x = length(size(x)) > 2 ? x : unsqueeze(x, 2)
     b_ = isa(m.bias, AbstractArray) ? unsqueeze(m.bias, 2) : m.bias
-    return σ.(batched_mul(m.weight, x)) .+ b_
+    return σ.(batched_mul(m.weight, x) .+ b_)
 end
 
 
