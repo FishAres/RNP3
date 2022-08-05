@@ -5,7 +5,6 @@ using ProgressMeter
 using ProgressMeter: Progress
 using Plots
 
-
 include(srcdir("interp_utils.jl"))
 include(srcdir("hypernet_utils.jl"))
 include(srcdir("nn_utils.jl"))
@@ -14,49 +13,40 @@ include(srcdir("logging_utils.jl"))
 
 include(srcdir("utils.jl"))
 
-function get_fstate_models(θs, Hx_bounds; args=args, fz=args[:f_z])
-    inds = Zygote.ignore() do
-        [0; cumsum([Hx_bounds...; args[:π]])]
-    end
-    Θ = [θs[inds[i]+1:inds[i+1], :] for i in 1:length(inds)-1]
-
+function get_fstate_models(Θ; args=args, fz=args[:f_z])
     Enc_za_z = Chain(HyDense(args[:π] + args[:asz], args[:π], Θ[1], elu), flatten)
-
     f_state = ps_to_RN(get_rn_θs(Θ[2], args[:π], args[:π]); f_out=fz)
-    err_rnn = ps_to_RN(get_rn_θs(Θ[3], args[:π], args[:π]); f_out=elu)
+    Dec_z_x̂ = Chain(HyDense(args[:π], 784, Θ[3], relu6), flatten)
+    z0 = fz.(Θ[4])
 
-    Dec_z_x̂ = Chain(HyDense(args[:π], 784, Θ[4], relu6), flatten)
-    Enc_ϵ_z = Chain(HyDense(784, args[:π], Θ[5], elu), flatten)
-
-    z0 = fz.(Θ[6])
-
-    return (Enc_za_z, f_state, err_rnn, Dec_z_x̂, Enc_ϵ_z,), z0
+    return (Enc_za_z, f_state, Dec_z_x̂,), z0, Θ[end]
 end
 
-
-function get_fpolicy_models(θs, Ha_bounds; args=args)
-    inds = Zygote.ignore() do
-        [0; cumsum([Ha_bounds...; args[:asz]])]
-    end
-    Θ = [θs[inds[i]+1:inds[i+1], :] for i in 1:length(inds)-1]
-
+almost_sin(x) = 0.75f0 * sin(x)
+function get_fpolicy_models(Θ; args=args)
     Enc_za_a = Chain(HyDense(args[:π] + args[:asz], args[:π], Θ[1], elu), flatten)
     f_policy = ps_to_RN(get_rn_θs(Θ[2], args[:π], args[:π]); f_out=elu)
-    Dec_z_a = Chain(HyDense(args[:π], args[:asz], Θ[3], tanh), flatten)
-
+    Dec_z_a = Chain(HyDense(args[:π], args[:asz], Θ[3], almost_sin), flatten)
     a0 = sin.(Θ[4])
 
-    return (Enc_za_a, f_policy, Dec_z_a), a0
+    return (Enc_za_a, f_policy, Dec_z_a), a0, Θ[end]
 end
 
-function get_models(θsz, θsa; args=args, Hx_bounds=Hx_bounds, Ha_bounds=Ha_bounds)
-    (Enc_za_z, f_state, err_rnn, Dec_z_x̂, Enc_ϵ_z,), z0 = get_fstate_models(θsz, Hx_bounds; args=args)
-    (Enc_za_a, f_policy, Dec_z_a,), a0 = get_fpolicy_models(θsa, Ha_bounds; args=args)
+function get_err_models(Θ; args=args)
+    Enc_ϵ_z = Chain(HyDense(784, args[:π], Θ[1], elu), flatten)
+    err_rnn = ps_to_RN(get_rn_θs(Θ[2], args[:π], args[:π]); f_out=elu)
+    return err_rnn, Enc_ϵ_z
+end
+
+function get_models(θsz, θsa; args=args)
+    (Enc_za_z, f_state, Dec_z_x̂,), z0, zθ = get_fstate_models(θsz; args=args)
+    (Enc_za_a, f_policy, Dec_z_a,), a0, aθ = get_fpolicy_models(θsa; args=args)
+    err_rnn, Enc_ϵ_z = get_err_models(He((zθ, aθ)); args=args)
     models = f_state, f_policy, err_rnn, Enc_za_z, Enc_za_a, Enc_ϵ_z, Dec_z_x̂, Dec_z_a
     return models, z0, a0
 end
 
-
+## =====
 
 "one iteration"
 function forward_pass(z1, a1, models, x)
