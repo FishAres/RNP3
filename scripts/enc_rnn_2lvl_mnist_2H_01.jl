@@ -3,6 +3,7 @@ using DrWatson
 ENV["GKSwstype"] = "nul"
 
 using MLDatasets
+using Flux, Zygote, CUDA
 using IterTools: partition, iterated
 using Flux: batch, unsqueeze, flatten
 using Flux.Data: DataLoader
@@ -82,10 +83,6 @@ Hx = Chain(
     LayerNorm(64, elu),
     Dense(64, 64),
     LayerNorm(64, elu),
-    # Split(
-    # [Dense(64, θ, bias=false) for θ in Hx_bounds]...,
-    # Dense(64, args[:π], elu),
-    # ),
     Dense(64, sum(Hx_bounds) + args[:π], bias=false),
 ) |> gpu
 
@@ -98,10 +95,6 @@ Ha = Chain(
     Dense(64, 64),
     LayerNorm(64, elu),
     Dense(64, sum(Ha_bounds) + args[:asz], bias=false),
-    # Split(
-    # [Dense(64, θ, bias=false) for θ in Ha_bounds]...,
-    # Dense(64, args[:asz], sin),
-    # ),
 ) |> gpu
 
 
@@ -115,8 +108,59 @@ RN2 = Chain(
 ps = Flux.params(Hx, Ha, RN2)
 
 ## ======
-# inds = sample(1:args[:bsz], 6, replace=false)
-# p = plot_recs(sample_loader(test_loader), inds)
+
+function get_loop(z, x; args=args)
+    outputs = patches, recs, errs, zs, as, patches_t = [], [], [], [], [], [], []
+    Flux.reset!(RN2)
+    θsz = Hx(z)
+    θsa = Ha(z)
+    models, z0, a0 = get_models(θsz, θsa; args=args)
+
+    z1, a1, x̂, patch_t, ϵ, Δz = forward_pass(z0, a0, models, x)
+    out_full, err_emb_full = full_sequence(models, z0, a0, x)
+
+    out_1, err_emb_1 = full_sequence(z1, patch_t)
+    out = sample_patch(out_full .+ 0.1f0, a1, sampling_grid)
+
+    push_to_arrays!((out_full, out, ϵ, z, a1, patch_t), outputs)
+
+    for t = 2:args[:glimpse_len]
+        z = RN2(err_emb_1)
+        θsz = Hx(z)
+        θsa = Ha(z)
+        models, z0, a0 = get_models(θsz, θsa; args=args)
+
+        out_full, err_emb_full = full_sequence(models, z0, a0, x)
+        z1, a1, x̂, patch_t, ϵ, Δz = forward_pass(z1, a1, models, x)
+        out_1, err_emb_1 = full_sequence(z1, patch_t)
+        out = sample_patch(out_1 .+ 0.1f0, a1, sampling_grid)
+        push_to_arrays!((out_full, out, ϵ, z, a1, patch_t), outputs)
+    end
+    return outputs
+end
+
+function plot_rec(x, out::Vector, xs::Vector, ind)
+    out_ = [reshape(cpu(k), 28, 28, 1, size(k)[end]) for k in out]
+    x_ = reshape(cpu(x), 28, 28, size(x)[end])
+    # p1 = plot_digit(out_[:, :, ind])
+    p1 = plot([plot_digit(x[:, :, 1, ind], boundc=false) for x in out_]...)
+    p2 = plot_digit(x_[:, :, ind])
+    p3 = plot([plot_digit(x[:, :, 1, ind], boundc=false) for x in xs]...)
+    return plot(p1, p2, p3, layout=(1, 3))
+end
+
+function plot_recs(x, inds; args=args)
+    z = rand(args[:D], args[:π], args[:bsz]) |> gpu
+    full_recs, patches, errs, xys, zs = get_loop(z, x)
+    full_recs = map(x -> reshape(x, 28, 28, 1, size(x)[end]), full_recs)
+
+    p = [plot_rec(x, patches, full_recs, ind) for ind in inds]
+    return plot(p...; layout=(length(inds), 1), size=(600, 800))
+end
+
+
+inds = sample(1:args[:bsz], 6, replace=false)
+p = plot_recs(sample_loader(test_loader), inds)
 
 ## =====
 
@@ -128,7 +172,7 @@ save_dir = get_save_dir(save_folder, alias)
 
 args[:seqlen] = 4
 args[:glimpse_len] = 4
-args[:scale_offset] = 3.0f0
+args[:scale_offset] = 3.2f0
 # args[:δL] = round(Float32(1 / args[:seqlen]), digits=3)
 args[:δL] = 0.0f0
 args[:λf] = 1.0f0
@@ -160,3 +204,7 @@ begin
 end
 
 ## ====
+L = vcat(Ls...)
+plot(L)
+
+

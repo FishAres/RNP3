@@ -24,21 +24,31 @@ args = Dict(
 
 ## =====
 
-device!(0)
+device!(2)
 
 dev = gpu
 
 ##=====
 
-train_chars, train_labels = Omniglot(split=:train)[:]
-test_chars, test_labels = Omniglot(split=:test)[:]
-train_chars = 1.0f0 .- imresize(train_chars, args[:img_size])
-test_chars = 1.0f0 .- imresize(test_chars, args[:img_size])
+all_chars = load("../Recur_generative/data/exp_pro/omniglot.jld2")
+xs = shuffle(vcat((all_chars[key] for key in keys(all_chars))...))
+x_batches = batch.(partition(xs, args[:bsz]))
 
-train_loader = DataLoader((train_chars |> dev), batchsize=args[:bsz], shuffle=true, partial=false)
-test_loader = DataLoader((test_chars |> dev), batchsize=args[:bsz], shuffle=true, partial=false)
+ntrain, ntest = 286, 15
+xs_train = flatten.(x_batches[1:ntrain] |> gpu)
+xs_test = flatten.(x_batches[ntrain+1:ntrain+ntest] |> gpu)
+x = xs_test[1]
 
-x = first(test_loader)
+
+# train_chars, train_labels = Omniglot(split=:train)[:]
+# test_chars, test_labels = Omniglot(split=:test)[:]
+# train_chars = 1.0f0 .- imresize(train_chars, args[:img_size])
+# test_chars = 1.0f0 .- imresize(test_chars, args[:img_size])
+
+# train_loader = DataLoader((train_chars |> dev), batchsize=args[:bsz], shuffle=true, partial=false)
+# test_loader = DataLoader((test_chars |> dev), batchsize=args[:bsz], shuffle=true, partial=false)
+
+# x = first(test_loader)
 
 ## ====
 dev = has_cuda() ? gpu : cpu
@@ -56,7 +66,7 @@ args[:f_z] = elu # activation function used for z vectors
 
 ## =====
 
-args[:π] = 96
+args[:π] = 64
 
 l_enc_za_z = (args[:π] + args[:asz]) * args[:π] # encoder (z_t, a_t) -> z_t+1
 l_fx = get_rnn_θ_sizes(args[:π], args[:π])
@@ -91,7 +101,7 @@ Ha = Chain(
     LayerNorm(64, elu),
     Dense(64, 64),
     LayerNorm(64, elu),
-    Dense(64, sum(Hx_bounds) + args[:π], bias=false)
+    Dense(64, sum(Ha_bounds) + args[:asz], bias=false)
 ) |> gpu
 
 RN2 = Chain(
@@ -106,12 +116,13 @@ ps = Flux.params(Hx, Ha, RN2)
 ## ======
 
 inds = sample(1:args[:bsz], 6, replace=false)
-p = plot_recs(sample_loader(test_loader), inds)
+p = plot_recs(rand(xs_test), inds)
 
 ## =====
 
 save_folder = "enc_rnn_2lvl"
-alias = "double_H_v01_omni"
+
+alias = "double_H_v01_no_w_heads_omni_2σ"
 save_dir = get_save_dir(save_folder, alias)
 
 ## =====
@@ -131,19 +142,19 @@ begin
     Ls = []
     for epoch in 1:200
         if epoch % 20 == 0
-        opt.eta = 0.9 * opt.eta
+            opt.eta = 0.9 * opt.eta
         end
-        ls = train_model(opt, ps, train_loader; epoch=epoch, logger=lg)
+        ls = train_model(opt, ps, xs_train; epoch=epoch, logger=lg)
         inds = sample(1:args[:bsz], 6, replace=false)
-        p = plot_recs(sample_loader(test_loader), inds)
+        p = plot_recs(rand(xs_test), inds)
         display(p)
         log_image(lg, "recs_$(epoch)", p)
-        L = test_model(test_loader)
+        L = test_model(xs_test)
         log_value(lg, "test_loss", L)
         @info "Test loss: $L"
         push!(Ls, ls)
         if epoch % 25 == 0
-        save_model((H, RN2), joinpath(save_folder, alias, savename(args) * "_$(epoch)eps"))
+            save_model((Hx, Ha, RN2), joinpath(save_folder, alias, savename(args) * "_$(epoch)eps"))
         end
     end
 end
@@ -153,6 +164,6 @@ end
 
 ## ====
 
-# L = vcat(Ls...)
-# plot(L)
-# plot(log.(1:length(L)), log.(L))
+L = vcat(Ls...)
+plot(L)
+plot(log.(1:length(L)), log.(L))

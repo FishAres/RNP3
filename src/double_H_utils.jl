@@ -33,6 +33,7 @@ function get_fstate_models(θs, Hx_bounds; args=args, fz=args[:f_z])
     return (Enc_za_z, f_state, err_rnn, Dec_z_x̂, Enc_ϵ_z,), z0
 end
 
+twoσ(x) = 2f0 * (σ(x) - 0.5f0)
 
 function get_fpolicy_models(θs, Ha_bounds; args=args)
     inds = Zygote.ignore() do
@@ -42,7 +43,7 @@ function get_fpolicy_models(θs, Ha_bounds; args=args)
 
     Enc_za_a = Chain(HyDense(args[:π] + args[:asz], args[:π], Θ[1], elu), flatten)
     f_policy = ps_to_RN(get_rn_θs(Θ[2], args[:π], args[:π]); f_out=elu)
-    Dec_z_a = Chain(HyDense(args[:π], args[:asz], Θ[3], tanh), flatten)
+    Dec_z_a = Chain(HyDense(args[:π], args[:asz], Θ[3], twoσ), flatten)
 
     a0 = sin.(Θ[4])
 
