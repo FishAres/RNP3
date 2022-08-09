@@ -24,7 +24,7 @@ args = Dict(
 
 ## =====
 
-device!(2)
+device!(1)
 
 dev = gpu
 

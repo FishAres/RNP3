@@ -137,12 +137,16 @@ Hx = Chain(
     LayerNorm(64, elu),
     Dense(64, 64),
     LayerNorm(64, elu),
+    Dense(64, 64),
+    LayerNorm(64, elu),
     Dense(64, sum(Hx_bounds) + args[:π], bias=false),
 ) |> gpu
 
 Ha = Chain(
     LayerNorm(args[:π],),
     Dense(args[:π], 64),
+    LayerNorm(64, elu),
+    Dense(64, 64),
     LayerNorm(64, elu),
     Dense(64, 64),
     LayerNorm(64, elu),
@@ -224,7 +228,7 @@ p = plot_recs(translate_batch(sample_loader(test_loader), args), inds)
 ## =====
 
 save_folder = "enc_rnn_2lvl"
-alias = "double_H_GRU_translated"
+alias = "double_H_GRU_translated_biggerH"
 save_dir = get_save_dir(save_folder, alias)
 
 ## =====
@@ -258,6 +262,9 @@ end
 
 ## ====
 L = vcat(Ls...)
+plot(L)
+plot(log.(1:length(L)), log.(L))
+
 
 
 

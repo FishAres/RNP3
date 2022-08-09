@@ -107,12 +107,29 @@ function test_model(test_data; D=args[:D])
     return L / length(test_data)
 end
 
+"testing different activation functions"
+function get_fpolicy_models(θs, Ha_bounds; args=args)
+    inds = Zygote.ignore() do
+        [0; cumsum([Ha_bounds...; args[:asz]])]
+    end
+    Θ = [θs[inds[i]+1:inds[i+1], :] for i in 1:length(inds)-1]
+
+    Enc_za_a = Chain(HyDense(args[:π] + args[:asz], args[:π], Θ[1], tanh), flatten)
+    f_policy = ps_to_RN(get_rn_θs(Θ[2], args[:π], args[:π]); f_out=tanh)
+    Dec_z_a = Chain(HyDense(args[:π], args[:asz], Θ[3], twoσ), flatten)
+
+    a0 = sin.(Θ[4])
+
+    return (Enc_za_a, f_policy, Dec_z_a), a0
+end
+
+
 ## ====
 
 
 # todo don't bind RNN size to args[:π]
 
-args[:π] = 32
+args[:π] = 64
 
 l_enc_za_z = (args[:π] + args[:asz]) * args[:π] # encoder (z_t, a_t) -> z_t+1
 l_fx = get_rnn_θ_sizes(args[:π], args[:π])
@@ -156,7 +173,7 @@ RN2 = Chain(
     Dense(args[:π], 64,),
     LayerNorm(64, elu),
     GRU(64, 64,),
-    Dense(64, args[:π], elu),
+    Dense(64, args[:π], tanh), # ! caution with activation function
 ) |> gpu
 
 ps = Flux.params(Hx, Ha, RN2)
@@ -226,13 +243,13 @@ p = plot_recs(translate_batch(sample_loader(test_loader), args), inds)
 ## =====
 
 save_folder = "enc_rnn_2lvl"
-alias = "double_H_GRU_translated__uniform_z_init_elu"
+alias = "double_H_GRU_translated__uniform_z_init_tanh"
 save_dir = get_save_dir(save_folder, alias)
 
 ## =====
 
 args[:seqlen] = 4
-args[:glimpse_len] = 5
+args[:glimpse_len] = 4
 args[:scale_offset] = 3.2f0
 args[:δL] = 0.0f0
 args[:λf] = 1.0f0
@@ -260,5 +277,30 @@ end
 
 ## ====
 L = vcat(Ls...)
-plot(L)
+
+z = rand(args[:D], args[:π], args[:bsz]) |> gpu
+full_recs, patches, errs, zs, a1s, patches_t = get_loop(z, x)
+
+errs[1]
+patches[1]
+
+ind = 1
+begin
+    ind = mod(ind + 1, args[:bsz]) + 1
+    plot([heatmap(reshape(k[:, ind], 28, 28)) for k in patches_t]...)
+    # plot([heatmap(k[:, :, 1, ind]) for k in patches]...)
+end
+
+a1s[1]
+
+offsets = [a[5:6, :] for a in a1s]
+
+offsets[1]
+offs = cat(offsets..., dims=3)
+
+plot([histogram(k', bins=-0.8:0.2:0.8) for k in offsets]...)
+
+plot([histogram(k[1, :, :]', bins=-0.8:0.2:0.8) for k in offs]...)
+
+histogram(offs[2, :, :], bins=-0.8:0.2:0.8, alpha=0.5)
 

@@ -17,9 +17,9 @@ CUDA.allowscalar(false)
 ## ====
 args = Dict(
     :bsz => 64, :img_size => (28, 28), :π => 32,
-    :esz => 32, :add_offset => true, :fa_out => identity,
+    :esz => 32, :add_offset => true, :fa_out => identity, :f_z => elu,
     :asz => 6, :glimpse_len => 4, :seqlen => 5, :λ => 1.0f-3, :δL => Float32(1 / 4),
-    :scale_offset => 2.8f0, :λf => 0.167f0
+    :scale_offset => 2.8f0, :λf => 0.167f0, :D => Normal(0.0f0, 1.0f0),
 )
 
 ## =====
@@ -51,14 +51,10 @@ diag_vec = [[1.0f0 0.0f0; 0.0f0 1.0f0] for _ in 1:args[:bsz]]
 const diag_mat = cat(diag_vec..., dims=3) |> dev
 const diag_off = cat(1.0f-6 .* diag_vec..., dims=3) |> dev
 ## =====
-args[:f_z] = elu # activation function used for z vectors
-
-
-## =====
 
 # todo don't bind RNN size to args[:π]
 
-args[:π] = 32
+args[:π] = 64
 
 l_enc_za_z = (args[:π] + args[:asz]) * args[:π] # encoder (z_t, a_t) -> z_t+1
 l_fx = get_rnn_θ_sizes(args[:π], args[:π])
@@ -101,7 +97,7 @@ Ha = Chain(
 RN2 = Chain(
     Dense(args[:π], 64,),
     LayerNorm(64, elu),
-    GRU(64, 64,),
+    LSTM(64, 64,),
     Dense(64, args[:π], elu),
 ) |> gpu
 
@@ -139,11 +135,26 @@ function get_loop(z, x; args=args)
     return outputs
 end
 
+# function plot_rec(x, out::Vector, xs::Vector, ind)
+#     out_ = [reshape(cpu(k), 28, 28, 1, size(k)[end]) for k in out]
+#     x_ = reshape(cpu(x), 28, 28, size(x)[end])
+#     # p1 = plot_digit(out_[:, :, ind])
+#     p1 = plot([plot_digit(x[:, :, 1, ind], boundc=false) for x in out_]...)
+#     p2 = plot_digit(x_[:, :, ind])
+#     p3 = plot([plot_digit(x[:, :, 1, ind], boundc=false) for x in xs]...)
+#     return plot(p1, p2, p3, layout=(1, 3))
+# end
+
 function plot_rec(x, out::Vector, xs::Vector, ind)
     out_ = [reshape(cpu(k), 28, 28, 1, size(k)[end]) for k in out]
     x_ = reshape(cpu(x), 28, 28, size(x)[end])
-    # p1 = plot_digit(out_[:, :, ind])
-    p1 = plot([plot_digit(x[:, :, 1, ind], boundc=false) for x in out_]...)
+    p1 = plot([
+        begin
+            plot_digit(x_[:, :, ind], boundc=false, alpha=0.5)
+            plot_digit!(x[:, :, 1, ind], boundc=false, alpha=0.6)
+
+        end
+        for x in out_]...)
     p2 = plot_digit(x_[:, :, ind])
     p3 = plot([plot_digit(x[:, :, 1, ind], boundc=false) for x in xs]...)
     return plot(p1, p2, p3, layout=(1, 3))
@@ -157,6 +168,7 @@ function plot_recs(x, inds; args=args)
     p = [plot_rec(x, patches, full_recs, ind) for ind in inds]
     return plot(p...; layout=(length(inds), 1), size=(600, 800))
 end
+## ====
 
 
 inds = sample(1:args[:bsz], 6, replace=false)
@@ -165,7 +177,7 @@ p = plot_recs(sample_loader(test_loader), inds)
 ## =====
 
 save_folder = "enc_rnn_2lvl"
-alias = "double_H_v01_no_w_heads_lstm"
+alias = "double_H_v01_lstm"
 save_dir = get_save_dir(save_folder, alias)
 
 ## =====
@@ -173,6 +185,7 @@ save_dir = get_save_dir(save_folder, alias)
 args[:seqlen] = 4
 args[:glimpse_len] = 4
 args[:scale_offset] = 3.2f0
+
 # args[:δL] = round(Float32(1 / args[:seqlen]), digits=3)
 args[:δL] = 0.0f0
 args[:λf] = 1.0f0
