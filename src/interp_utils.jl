@@ -82,8 +82,8 @@ end
 
 
 
-function sample_patch(x, thetas, sampling_grid; sz=args[:img_size])
-    grid = grid_generator_3d(sampling_grid, thetas)
+function sample_patch(x, thetas, sampling_grid; sz=args[:img_size], scale_offset=args[:scale_offset])
+    grid = grid_generator_3d(sampling_grid, thetas; scale_offset=scale_offset)
     # grid = grid_generator_fast(sampling_grid, thetas)
     tg = reshape(grid, 2, sz..., size(grid)[end])
     x = reshape(x, sz..., 1, size(x)[end])
