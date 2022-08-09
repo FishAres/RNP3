@@ -67,7 +67,7 @@ function grid_generator_fast(sampling_grid_2d, thetas; scale_offset=args[:scale_
     return batched_mul(A, sampling_grid_2d) .+ unsqueeze(b, 2)
 end
 
-"faster to do one matrix inverse but needs diag_off for stability"
+"faster to do one matrix inverse but needs (const) diag_off(set) for stability"
 @inline function get_inv_grid(sampling_grid_2d, thetas; scale_offset=args[:scale_offset])
     A_rot, A_s, A_shear, b = get_affine_mats(thetas; scale_offset=scale_offset)
     A = batched_mul(batched_mul(A_rot, A_shear), A_s) .+ diag_off
@@ -97,8 +97,8 @@ function sample_patch(x, transformed_grid; sz=args[:img_size])
 end
 
 
-Zygote.@nograd function zoom_in2d(x, xy, sampling_grid; args=args)
-    inv_grid = get_inv_grid(sampling_grid, xy)
+Zygote.@nograd function zoom_in2d(x, xy, sampling_grid; args=args, scale_offset=args[:scale_offset])
+    inv_grid = get_inv_grid(sampling_grid, xy; scale_offset=scale_offset)
     out_inv = sample_patch(x, inv_grid)
     out_inv
 end

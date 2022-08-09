@@ -10,7 +10,7 @@ using Flux.Data: DataLoader
 using Distributions
 using StatsBase: sample
 using Random: shuffle
-
+using ParameterSchedulers
 include(srcdir("double_H_utils.jl"))
 
 CUDA.allowscalar(false)
@@ -19,7 +19,8 @@ args = Dict(
     :bsz => 64, :img_size => (28, 28), :π => 32,
     :esz => 32, :add_offset => true, :fa_out => identity, :f_z => elu,
     :asz => 6, :glimpse_len => 4, :seqlen => 5, :λ => 1.0f-3, :δL => Float32(1 / 4),
-    :scale_offset => 2.8f0, :λf => 0.167f0, :D => Normal(0.0f0, 1.0f0),
+    :scale_offset => 2.8f0, :scale_offset_sense => 3.2f0,
+    :λf => 0.167f0, :D => Normal(0.0f0, 1.0f0),
 )
 
 ## =====
@@ -104,7 +105,7 @@ RN2 = Chain(
 ps = Flux.params(Hx, Ha, RN2)
 
 ## ======
-
+# todo: better variable names (patches, out, etc.)
 function get_loop(z, x; args=args)
     outputs = patches, recs, errs, zs, as, patches_t = [], [], [], [], [], [], []
     Flux.reset!(RN2)
@@ -112,11 +113,10 @@ function get_loop(z, x; args=args)
     θsa = Ha(z)
     models, z0, a0 = get_models(θsz, θsa; args=args)
 
-    z1, a1, x̂, patch_t, ϵ, Δz = forward_pass(z0, a0, models, x)
+    z1, a1, x̂, patch_t, ϵ, Δz = forward_pass(z0, a0, models, x; scale_offset=args[:scale_offset_sense])
     out_full, err_emb_full = full_sequence(models, z0, a0, x)
-
     out_1, err_emb_1 = full_sequence(z1, patch_t)
-    out = sample_patch(out_full .+ 0.1f0, a1, sampling_grid)
+    out = sample_patch(out_full .+ 0.1f0, a1, sampling_grid; scale_offset=args[:scale_offset_sense])
 
     push_to_arrays!((out_full, out, ϵ, z, a1, patch_t), outputs)
 
@@ -127,11 +127,18 @@ function get_loop(z, x; args=args)
         models, z0, a0 = get_models(θsz, θsa; args=args)
 
         out_full, err_emb_full = full_sequence(models, z0, a0, x)
-        z1, a1, x̂, patch_t, ϵ, Δz = forward_pass(z1, a1, models, x)
+        z1, a1, x̂, patch_t, ϵ, Δz = forward_pass(z1, a1, models, x; scale_offset=args[:scale_offset_sense])
         out_1, err_emb_1 = full_sequence(z1, patch_t)
-        out = sample_patch(out_1 .+ 0.1f0, a1, sampling_grid)
+        out = sample_patch(out_1 .+ 0.1f0, a1, sampling_grid; scale_offset=args[:scale_offset_sense])
         push_to_arrays!((out_full, out, ϵ, z, a1, patch_t), outputs)
     end
+    z = RN2(err_emb_1)
+    θsz = Hx(z)
+    θsa = Ha(z)
+    models, z0, a0 = get_models(θsz, θsa; args=args)
+    out_full, err_emb_full = full_sequence(models, z0, a0, x; scale_offset=args[:scale_offset])
+
+    push_to_arrays!((out_full, out, ϵ, z, a1, patch_t), outputs)
     return outputs
 end
 
@@ -150,9 +157,10 @@ function plot_rec(x, out::Vector, xs::Vector, ind)
     x_ = reshape(cpu(x), 28, 28, size(x)[end])
     p1 = plot([
         begin
-            plot_digit(x_[:, :, ind], boundc=false, alpha=0.5)
-            plot_digit!(x[:, :, 1, ind], boundc=false, alpha=0.6)
-
+            # plot_digit(x_[:, :, ind], boundc=false, alpha=0.5)
+            # plot_digit!(x[:, :, 1, ind], boundc=false, alpha=0.6)
+            xnew = 0.2f0 .* x_[:, :, ind] + x[:, :, 1, ind]
+            plot_digit(xnew, boundc=false)
         end
         for x in out_]...)
     p2 = plot_digit(x_[:, :, ind])
@@ -170,14 +178,13 @@ function plot_recs(x, inds; args=args)
 end
 ## ====
 
-
 inds = sample(1:args[:bsz], 6, replace=false)
 p = plot_recs(sample_loader(test_loader), inds)
 
 ## =====
 
 save_folder = "enc_rnn_2lvl"
-alias = "double_H_v01_lstm"
+alias = "double_H_lstm_mnist_var_offset_4recs"
 save_dir = get_save_dir(save_folder, alias)
 
 ## =====
@@ -185,22 +192,22 @@ save_dir = get_save_dir(save_folder, alias)
 args[:seqlen] = 4
 args[:glimpse_len] = 4
 args[:scale_offset] = 3.2f0
+args[:scale_offset_sense] = 4.2f0
 
 # args[:δL] = round(Float32(1 / args[:seqlen]), digits=3)
 args[:δL] = 0.0f0
 args[:λf] = 1.0f0
 args[:λ] = 0.001f0
 args[:D] = Normal(0.0f0, 1.0f0)
-opt = ADAM(1e-4)
+args[:η] = 1e-5
+opt = ADAM(args[:η])
 lg = new_logger(joinpath(save_folder, alias), args)
 # todo try sinusoidal lr schedule
 
+## ====
 begin
     Ls = []
     for epoch in 1:200
-        if epoch % 20 == 0
-            opt.eta = 0.9 * opt.eta
-        end
         ls = train_model(opt, ps, train_loader; epoch=epoch, logger=lg)
         inds = sample(1:args[:bsz], 6, replace=false)
         p = plot_recs(sample_loader(test_loader), inds)
@@ -210,9 +217,9 @@ begin
         log_value(lg, "test_loss", L)
         @info "Test loss: $L"
         push!(Ls, ls)
-        if epoch % 25 == 0
-            save_model((Hx, Ha, RN2), joinpath(save_folder, alias, savename(args) * "_$(epoch)eps"))
-        end
+        # if epoch % 25 == 0
+        # save_model((Hx, Ha, RN2), joinpath(save_folder, alias, savename(args) * "_$(epoch)eps"))
+        # end
     end
 end
 

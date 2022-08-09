@@ -33,7 +33,7 @@ function get_fstate_models(θs, Hx_bounds; args=args, fz=args[:f_z])
     return (Enc_za_z, f_state, err_rnn, Dec_z_x̂, Enc_ϵ_z,), z0
 end
 
-twoσ(x) = 2f0 * (σ(x) - 0.5f0)
+twoσ(x) = 2.0f0 * (σ(x) - 0.5f0)
 
 function get_fpolicy_models(θs, Ha_bounds; args=args)
     inds = Zygote.ignore() do
@@ -60,7 +60,7 @@ end
 
 
 "one iteration"
-function forward_pass(z1, a1, models, x)
+function forward_pass(z1, a1, models, x; scale_offset=args[:scale_offset])
     f_state, f_policy, err_rnn, Enc_za_z, Enc_za_a, Enc_ϵ_z, Dec_z_x̂, Dec_z_a = models
 
     za = vcat(z1, a1) # todo parallel layer?
@@ -70,7 +70,7 @@ function forward_pass(z1, a1, models, x)
     a1 = Dec_z_a(f_policy(ea))
 
     x̂ = Dec_z_x̂(z1)
-    patch_t = zoom_in2d(x, a1, sampling_grid) |> flatten
+    patch_t = zoom_in2d(x, a1, sampling_grid; scale_offset=scale_offset) |> flatten
 
     ϵ = Zygote.ignore() do
         # block gradients for pred. error
@@ -80,25 +80,25 @@ function forward_pass(z1, a1, models, x)
     return z1, a1, x̂, patch_t, ϵ, Δz
 end
 
-function full_sequence(models::Tuple, z0, a0, x; args=args)
+function full_sequence(models::Tuple, z0, a0, x; args=args, scale_offset=args[:scale_offset])
     f_state, f_policy, err_rnn, Enc_za_z, Enc_za_a, Enc_ϵ_z, Dec_z_x̂, Dec_z_a = models
 
-    z1, a1, x̂, patch_t, ϵ, Δz = forward_pass(z0, a0, models, x)
+    z1, a1, x̂, patch_t, ϵ, Δz = forward_pass(z0, a0, models, x; scale_offset=scale_offset)
     err_emb = err_rnn(Δz) # update error embedding
     out = sample_patch(x̂, a1, sampling_grid)
     for t = 2:args[:seqlen]
-        z1, a1, x̂, patch_t, ϵ, Δz = forward_pass(z1, a1, models, x)
+        z1, a1, x̂, patch_t, ϵ, Δz = forward_pass(z1, a1, models, x; scale_offset=scale_offset)
         err_emb = err_rnn(Δz) # update error embedding
         out += sample_patch(x̂, a1, sampling_grid)
     end
     return out, err_emb
 end
 
-function full_sequence(z::AbstractArray, x; args=args)
+function full_sequence(z::AbstractArray, x; args=args, scale_offset=args[:scale_offset])
     θsz = Hx(z)
     θsa = Ha(z)
     models, z0, a0 = get_models(θsz, θsa; args=args)
-    return full_sequence(models, z0, a0, x; args=args)
+    return full_sequence(models, z0, a0, x; args=args, scale_offset=scale_offset)
 end
 
 
@@ -108,11 +108,11 @@ function model_loss(z, x; args=args)
     θsa = Ha(z)
     models, z0, a0 = get_models(θsz, θsa; args=args)
     # is z0, a0 necessary?
-    z1, a1, x̂, patch_t, ϵ, Δz = forward_pass(z0, a0, models, x)
-    out_1, err_emb_1 = full_sequence(z1, patch_t)
-    out_full, err_emb_full = full_sequence(models, z0, a0, x)
+    z1, a1, x̂, patch_t, ϵ, Δz = forward_pass(z0, a0, models, x; scale_offset=args[:scale_offset_sense])
+    out_1, err_emb_1 = full_sequence(z1, patch_t; scale_offset=args[:scale_offset])
+    out_full, err_emb_full = full_sequence(models, z0, a0, x; scale_offset=args[:scale_offset])
 
-    Lpatch = Flux.mse(flatten(x̂), flatten(patch_t))
+    # Lpatch = Flux.mse(flatten(x̂), flatten(patch_t))
     Lfull = Flux.mse(flatten(out_full), flatten(x))
     for t = 2:args[:glimpse_len]
         z = RN2(err_emb_1)
@@ -120,16 +120,27 @@ function model_loss(z, x; args=args)
         θsa = Ha(z)
         models, z0, a0 = get_models(θsz, θsa; args=args)
 
-        out_full, err_emb_full = full_sequence(models, z0, a0, x)
-        z1, a1, x̂, patch_t, ϵ, Δz = forward_pass(z1, a1, models, x)
-        out_1, err_emb_1 = full_sequence(z1, patch_t)
+        out_full, err_emb_full = full_sequence(models, z0, a0, x; scale_offset=args[:scale_offset])
+        z1, a1, x̂, patch_t, ϵ, Δz = forward_pass(z1, a1, models, x; scale_offset=args[:scale_offset_sense])
+        out_1, err_emb_1 = full_sequence(z1, patch_t; scale_offset=args[:scale_offset])
 
-        Lpatch += Flux.mse(flatten(x̂), flatten(patch_t))
+        # Lpatch += Flux.mse(flatten(x̂), flatten(patch_t))
         Lfull += Flux.mse(flatten(out_full), flatten(x))
     end
+    z = RN2(err_emb_1)
+    θsz = Hx(z)
+    θsa = Ha(z)
+    models, z0, a0 = get_models(θsz, θsa; args=args)
+    out_full, err_emb_full = full_sequence(models, z0, a0, x; scale_offset=args[:scale_offset])
 
-    local_loss = args[:δL] * Lpatch
-    return local_loss + args[:λf] * Lfull
+    # Lpatch += Flux.mse(flatten(x̂), flatten(patch_t))
+    Lfull += Flux.mse(flatten(out_full), flatten(x))
+
+    # local_loss = args[:δL] * Lpatch
+
+    # return local_loss + args[:λf] * Lfull
+    return Lfull
+
 end
 
 Zygote.@nograd function push_to_arrays!(outputs, arrays)
@@ -145,10 +156,10 @@ function get_loop(z, x; args=args)
     θsa = Ha(z)
     models, z0, a0 = get_models(θsz, θsa; args=args)
 
-    z1, a1, x̂, patch_t, ϵ, Δz = forward_pass(z0, a0, models, x)
-    out_full, err_emb_full = full_sequence(models, z0, a0, x)
+    z1, a1, x̂, patch_t, ϵ, Δz = forward_pass(z0, a0, models, x; scale_offset=args[:scale_offset_sense])
+    out_full, err_emb_full = full_sequence(models, z0, a0, x; scale_offset=args[:scale_offset])
 
-    out_1, err_emb_1 = full_sequence(z1, patch_t)
+    out_1, err_emb_1 = full_sequence(z1, patch_t; scale_offset=args[:scale_offset])
     out = sample_patch(out_full .+ 0.1f0, a1, sampling_grid)
 
     push_to_arrays!((out_full, out, ϵ, z, a1, patch_t), outputs)
@@ -160,11 +171,18 @@ function get_loop(z, x; args=args)
         models, z0, a0 = get_models(θsz, θsa; args=args)
 
         out_full, err_emb_full = full_sequence(models, z0, a0, x)
-        z1, a1, x̂, patch_t, ϵ, Δz = forward_pass(z1, a1, models, x)
+        z1, a1, x̂, patch_t, ϵ, Δz = forward_pass(z1, a1, models, x; scale_offset=args[:scale_offset_sense])
         out_1, err_emb_1 = full_sequence(z1, patch_t)
         out += sample_patch(out_1 .+ 0.1f0, a1, sampling_grid)
         push_to_arrays!((out_full, out, ϵ, z, a1, patch_t), outputs)
     end
+    z = RN2(err_emb_1)
+    θsz = Hx(z)
+    θsa = Ha(z)
+    models, z0, a0 = get_models(θsz, θsa; args=args)
+    out_full, err_emb_full = full_sequence(models, z0, a0, x; scale_offset=args[:scale_offset])
+
+    push_to_arrays!((out_full, out, ϵ, z, a1, patch_t), outputs)
     return outputs
 end
 
