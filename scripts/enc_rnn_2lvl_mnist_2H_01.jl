@@ -105,6 +105,12 @@ RN2 = Chain(
 ps = Flux.params(Hx, Ha, RN2)
 
 ## ======
+
+modelpath = "saved_models/enc_rnn_2lvl/double_H_lstm_mnist_var_offset_4recs/add_offset=true_asz=6_bsz=64_esz=32_glimpse_len=3_scale_offset=3.2_scale_offset_sense=4.2_seqlen=4_δL=0.0_η=1e-5_λ=0.001_λf=1.0_π=64_75eps.bson"
+
+Hx, Ha, RN2 = load(modelpath)[:model] |> gpu
+
+## ======
 # todo: better variable names (patches, out, etc.)
 function get_loop(z, x; args=args)
     outputs = patches, recs, errs, zs, as, patches_t = [], [], [], [], [], [], []
@@ -190,7 +196,7 @@ save_dir = get_save_dir(save_folder, alias)
 ## =====
 
 args[:seqlen] = 4
-args[:glimpse_len] = 4
+args[:glimpse_len] = 3
 args[:scale_offset] = 3.2f0
 args[:scale_offset_sense] = 4.2f0
 
@@ -198,7 +204,7 @@ args[:scale_offset_sense] = 4.2f0
 args[:δL] = 0.0f0
 args[:λf] = 1.0f0
 args[:λ] = 0.001f0
-args[:D] = Normal(0.0f0, 1.0f0)
+args[:D] = Normal(0.3f0, 0.002f0)
 args[:η] = 1e-5
 opt = ADAM(args[:η])
 lg = new_logger(joinpath(save_folder, alias), args)
@@ -217,14 +223,16 @@ begin
         log_value(lg, "test_loss", L)
         @info "Test loss: $L"
         push!(Ls, ls)
-        # if epoch % 25 == 0
-        # save_model((Hx, Ha, RN2), joinpath(save_folder, alias, savename(args) * "_$(epoch)eps"))
-        # end
+        if epoch % 25 == 0
+            save_model((Hx, Ha, RN2), joinpath(save_folder, alias, savename(args) * "_$(epoch)eps"))
+        end
     end
 end
 
 ## ====
 L = vcat(Ls...)
 plot(L)
+
+## ==== Analysis
 
 

@@ -184,13 +184,13 @@ end
 
 ## ====
 
-inds = sample(1:args[:bsz], 6, replace=false)
-p = plot_recs(rand(test_loader), inds)
+# inds = sample(1:args[:bsz], 6, replace=false)
+# p = plot_recs(rand(test_loader), inds)
 
 ## =====
 
 save_folder = "enc_rnn_2lvl"
-alias = "double_H_lstm_mnist_var_offset_4recs"
+alias = "double_H_lstm_omni_var_offset_4recs"
 save_dir = get_save_dir(save_folder, alias)
 
 ## =====
@@ -205,13 +205,13 @@ args[:δL] = 0.0f0
 args[:λf] = 1.0f0
 args[:λ] = 0.001f0
 args[:D] = Normal(0.0f0, 1.0f0)
-opt = ADAM(1e-4)
+opt = ADAM(4e-5)
 lg = new_logger(joinpath(save_folder, alias), args)
 # todo try sinusoidal lr schedule
 
 begin
     Ls = []
-    for epoch in 1:40
+    for epoch in 1:400
         # if epoch % 20 == 0
         # opt.eta = 0.9 * opt.eta
         # end
@@ -224,9 +224,9 @@ begin
         log_value(lg, "test_loss", L)
         @info "Test loss: $L"
         push!(Ls, ls)
-        # if epoch % 25 == 0
-        # save_model((Hx, Ha, RN2), joinpath(save_folder, alias, savename(args) * "_$(epoch)eps"))
-        # end
+        if epoch % 25 == 0
+        save_model((Hx, Ha, RN2), joinpath(save_folder, alias, savename(args) * "_$(epoch)eps"))
+        end
     end
 end
 
