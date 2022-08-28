@@ -132,13 +132,23 @@ ps = Flux.params(Hx, Ha, RN2)
 
 ## ======
 
+function plot_recs(x, inds; args=args)
+    z = rand(args[:D], args[:π], args[:bsz]) |> gpu
+    rs = [rand(args[:D], args[:π], args[:bsz]) for _ in 1:args[:seqlen]] |> gpu
+    full_recs, patches, errs, xys, zs = get_loop(z, x, rs)
+    full_recs = map(x -> reshape(x, 28, 28, 1, size(x)[end]), full_recs)
+
+    p = [plot_rec(x, patches, full_recs, ind) for ind in inds]
+    return plot(p...; layout=(length(inds), 1), size=(600, 800))
+end
+
 inds = sample(1:args[:bsz], 6, replace=false)
 p = plot_recs(sample_loader(test_loader), inds)
 
 ## =====
 
 save_folder = "enc_rnn_2lvl"
-alias = "2lvl_double_H_mnist_vae_v0"
+alias = "2lvl_double_H_mnist_vae_v01"
 save_dir = get_save_dir(save_folder, alias)
 
 ## =====
@@ -146,13 +156,17 @@ save_dir = get_save_dir(save_folder, alias)
 args[:seqlen] = 4
 args[:glimpse_len] = 3
 args[:scale_offset] = 3.2f0
-args[:scale_offset_sense] = 3.8f0
+args[:scale_offset_sense] = 4.8f0
 
 # args[:δL] = round(Float32(1 / args[:seqlen]), digits=3)
 args[:δL] = 0.0f0
 args[:λf] = 1.0f0
 args[:λ] = 0.001f0
 args[:D] = Normal(0.0f0, 1.0f0)
+
+args[:α] = 1.0f0
+args[:β] = 1.0f0
+
 
 args[:η] = 1e-4
 opt = ADAM(args[:η])

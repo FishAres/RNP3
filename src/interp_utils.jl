@@ -5,6 +5,7 @@ using Tullio
 using Flux: unsqueeze
 using Images
 
+const π32 = Float32(π)
 
 function filter_batch(x, f, p::Number=1.0f0)
     sz = size(x)
@@ -42,11 +43,11 @@ function get_shear_mat(theta_shear)
     hcat(vcat(ones_vec, theta_shear), vcat(zeros_vec, ones_vec))
 end
 
-
 @inline function get_affine_mats(thetas; scale_offset=0.0f0)
     sc = (@view thetas[[1, 4], :]) .+ 1.0f0 .+ scale_offset
     b = sc .* (@view thetas[5:6, :])
-    A_rot = get_rot_mat(@view thetas[2, :])
+    # A_rot = get_rot_mat(@view thetas[2, :])
+    A_rot = get_rot_mat(π32 * (@view thetas[2, :]))
     A_sc = unsqueeze(sc, 2) .* diag_mat
     A_shear = get_shear_mat(@view thetas[3, :])
     return A_rot, A_sc, A_shear, b
@@ -71,28 +72,27 @@ end
 @inline function get_inv_grid(sampling_grid_2d, thetas; scale_offset=args[:scale_offset])
     A_rot, A_s, A_shear, b = get_affine_mats(thetas; scale_offset=scale_offset)
     A = batched_mul(batched_mul(A_rot, A_shear), A_s) .+ diag_off
+    # A = batched_mul(batched_mul(A_rot, A_shear), A_s)
     # sh_inv = cat(map(inv, eachslice(cpu(A_shear), dims=3))..., dims=3)
     # sc_inv = cat(map(inv, eachslice(cpu(A_s) .+ 1.0f-5, dims=3))..., dims=3)
     # rot_inv = cat(map(inv, eachslice(cpu(A_rot), dims=3))..., dims=3)
     # Ainv = batched_mul(batched_mul(sc_inv, sh_inv), rot_inv) |> gpu
-    Ainv = cat(map(inv, eachslice(cpu(A), dims=3))..., dims=3) |> gpu
     # Ainv = mul(sc_inv, sh_inv, rot_inv) |> gpu
+    Ainv = cat(map(inv, eachslice(cpu(A), dims=3))..., dims=3) |> gpu
     return batched_mul(Ainv, (sampling_grid_2d .- unsqueeze(b, 2)))
 end
-
-
 
 function sample_patch(x, thetas, sampling_grid; sz=args[:img_size], scale_offset=args[:scale_offset])
     grid = grid_generator_3d(sampling_grid, thetas; scale_offset=scale_offset)
     # grid = grid_generator_fast(sampling_grid, thetas)
     tg = reshape(grid, 2, sz..., size(grid)[end])
-    x = reshape(x, sz..., 1, size(x)[end])
+    x = reshape(x, sz..., args[:img_channels], size(x)[end])
     grid_sample(x, tg; padding_mode=:zeros)
 end
 
 function sample_patch(x, transformed_grid; sz=args[:img_size])
     tg = reshape(transformed_grid, 2, sz..., size(transformed_grid)[end])
-    x = reshape(x, sz..., 1, size(x)[end])
+    x = reshape(x, sz..., args[:img_channels], size(x)[end])
     grid_sample(x, tg; padding_mode=:zeros)
 end
 

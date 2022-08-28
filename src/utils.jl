@@ -23,3 +23,13 @@ rect(w, h, x, y) = Shape(x .+ [0, w, w, 0, 0], y .+ [0, 0, h, h, 0])
 function partial(f, a...)
     return (b...) -> f(a..., b...)
 end
+
+function sample_loader(loader)
+    rand_int = rand(1:length(loader))
+    x_ = for (i, x) in enumerate(loader)
+        if i == rand_int
+            return x
+        end
+    end
+    x_
+end

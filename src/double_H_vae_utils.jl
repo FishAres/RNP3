@@ -30,8 +30,8 @@ function get_fstate_models(θs, Hx_bounds; args=args, fz=args[:f_z])
     f_state = ps_to_RN(get_rn_θs(Θ[2], args[:π], args[:π]); f_out=fz)
     err_rnn = ps_to_RN(get_rn_θs(Θ[3], args[:π], args[:π]); f_out=elu)
 
-    Dec_z_x̂ = Chain(HyDense(args[:π], 784, Θ[4], relu6), flatten)
-    Enc_ϵ_z = Chain(HyDense(784, args[:π], Θ[5], elu), flatten)
+    Dec_z_x̂ = Chain(HyDense(args[:π], args[:imszprod], Θ[4], relu6), flatten)
+    Enc_ϵ_z = Chain(HyDense(args[:imszprod], args[:π], Θ[5], elu), flatten)
 
     z0 = fz.(Θ[6])
 
@@ -114,11 +114,11 @@ function model_loss(z, x, rs; args=args)
     models, z0, a0 = get_models(θsz, θsa; args=args)
     # is z0, a0 necessary?
     z1, a1, x̂, patch_t, ϵ, Δz = forward_pass(z0, a0, models, x; scale_offset=args[:scale_offset_sense])
-    out_1, err_emb_1 = full_sequence(z1, patch_t; scale_offset=args[:scale_offset])
+    out_1, err_emb_1 = full_sequence(z1, patch_t; scale_offset=args[:scale_offset_sense])
     out_full, err_emb_full = full_sequence(models, z0, a0, x; scale_offset=args[:scale_offset])
 
     # Lpatch = Flux.mse(flatten(x̂), flatten(patch_t))
-    Lfull = Flux.mse(flatten(out_full), flatten(x))
+    Lfull = Flux.mse(flatten(out_full), flatten(x); agg=sum)
     for t = 2:args[:glimpse_len]
         μ, logvar = RN2(err_emb_1)
         z = sample_z(μ, logvar, rs[t-1])
@@ -128,7 +128,7 @@ function model_loss(z, x, rs; args=args)
 
         out_full, err_emb_full = full_sequence(models, z0, a0, x; scale_offset=args[:scale_offset])
         z1, a1, x̂, patch_t, ϵ, Δz = forward_pass(z1, a1, models, x; scale_offset=args[:scale_offset_sense])
-        out_1, err_emb_1 = full_sequence(z1, patch_t; scale_offset=args[:scale_offset])
+        out_1, err_emb_1 = full_sequence(z1, patch_t; scale_offset=args[:scale_offset_sense])
 
         # Lpatch += Flux.mse(flatten(x̂), flatten(patch_t))
         Lfull += Flux.mse(flatten(out_full), flatten(x))
@@ -142,9 +142,9 @@ function model_loss(z, x, rs; args=args)
     # Lpatch += Flux.mse(flatten(x̂), flatten(patch_t))
     # local_loss = args[:δL] * Lpatch
     # return local_loss + args[:λf] * Lfull
-    Lfull += Flux.mse(flatten(out_full), flatten(x))
+    Lfull += Flux.mse(flatten(out_full), flatten(x); agg=sum)
     klqp = kl_loss(μ, logvar)
-    return Lfull
+    return Lfull, klqp
 
 end
 
@@ -155,19 +155,19 @@ Zygote.@nograd function push_to_arrays!(outputs, arrays)
 end
 
 function get_loop(z, x, rs; args=args)
-    outputs = patches, recs, errs, zs, as, patches_t = [], [], [], [], [], [], []
+    outputs = full_recs, patches, errs, zs, as, patches_t = [], [], [], [], [], [], []
+
     Flux.reset!(RN2)
     θsz = Hx(z)
     θsa = Ha(z)
     models, z0, a0 = get_models(θsz, θsa; args=args)
 
     z1, a1, x̂, patch_t, ϵ, Δz = forward_pass(z0, a0, models, x; scale_offset=args[:scale_offset_sense])
-    out_full, err_emb_full = full_sequence(models, z0, a0, x; scale_offset=args[:scale_offset])
+    out_full, err_emb_full = full_sequence(models, z0, a0, x)
+    out_1, err_emb_1 = full_sequence(z1, patch_t; scale_offset=args[:scale_offset_sense])
+    sense_patch = sample_patch(out_1 .+ 0.1f0, a1, sampling_grid; scale_offset=args[:scale_offset_sense])
 
-    out_1, err_emb_1 = full_sequence(z1, patch_t; scale_offset=args[:scale_offset])
-    out = sample_patch(out_full .+ 0.1f0, a1, sampling_grid)
-
-    push_to_arrays!((out_full, out, ϵ, z, a1, patch_t), outputs)
+    push_to_arrays!((out_full, sense_patch, ϵ, z, a1, patch_t), outputs)
 
     for t = 2:args[:glimpse_len]
         μ, logvar = RN2(err_emb_1)
@@ -178,9 +178,11 @@ function get_loop(z, x, rs; args=args)
 
         out_full, err_emb_full = full_sequence(models, z0, a0, x)
         z1, a1, x̂, patch_t, ϵ, Δz = forward_pass(z1, a1, models, x; scale_offset=args[:scale_offset_sense])
-        out_1, err_emb_1 = full_sequence(z1, patch_t)
-        out += sample_patch(out_1 .+ 0.1f0, a1, sampling_grid)
-        push_to_arrays!((out_full, out, ϵ, z, a1, patch_t), outputs)
+        out_1, err_emb_1 = full_sequence(z1, patch_t; scale_offset=args[:scale_offset_sense])
+        sense_patch = sample_patch(out_1 .+ 0.1f0, a1, sampling_grid; scale_offset=args[:scale_offset_sense])
+        push_to_arrays!((out_full, sense_patch, ϵ, z, a1, patch_t), outputs)
+
+
     end
     μ, logvar = RN2(err_emb_1)
     z = sample_z(μ, logvar, rs[end])
@@ -189,7 +191,7 @@ function get_loop(z, x, rs; args=args)
     models, z0, a0 = get_models(θsz, θsa; args=args)
     out_full, err_emb_full = full_sequence(models, z0, a0, x; scale_offset=args[:scale_offset])
 
-    push_to_arrays!((out_full, out, ϵ, z, a1, patch_t), outputs)
+    push_to_arrays!((out_full, sense_patch, ϵ, z, a1, patch_t), outputs)
     return outputs
 end
 
@@ -204,11 +206,13 @@ function train_model(opt, ps, train_data; args=args, epoch=1, logger=nothing, D=
           for _ in 1:length(train_data)] |> gpu
     for (i, x) in enumerate(train_data)
         loss, grad = withgradient(ps) do
-            loss = model_loss(zs[i], x, rs[i])
+            rec_loss, klqp = model_loss(zs[i], x, rs[i])
             logger !== nothing && Zygote.ignore() do
-                log_value(lg, "loss", loss)
+                log_value(lg, "rec_loss", rec_loss)
+                log_value(lg, "KL loss", klqp)
             end
-            loss + args[:λ] * (norm(Flux.params(Hx)) + norm(Flux.params(Ha)))
+            # loss + args[:λ] * (norm(Flux.params(Hx)) + norm(Flux.params(Ha)))
+            args[:α] * rec_loss + args[:β] * klqp + args[:λ] * (norm(Flux.params(Hx)) + norm(Flux.params(Ha)))
         end
         # foreach(x -> clamp!(x, -0.1f0, 0.1f0), grad)
         Flux.update!(opt, ps, grad)
@@ -224,22 +228,24 @@ function test_model(test_data; D=args[:D])
           for _ in 1:length(test_data)] |> gpu
     L = 0.0f0
     for (i, x) in enumerate(test_data)
-        L += model_loss(zs[i], x, rs[i])
+        rec_loss, klqp = model_loss(zs[i], x, rs[i])
+        L += args[:α] * rec_loss + args[:β] * klqp
+
     end
     return L / length(test_data)
 end
 
 function plot_rec(out, x, ind; kwargs...)
-    out_ = reshape(cpu(out), 28, 28, size(out)[end])
-    x_ = reshape(cpu(x), 28, 28, size(x)[end])
+    out_ = reshape(cpu(out), args[:img_size]..., size(out)[end])
+    x_ = reshape(cpu(x), args[:img_size]..., size(x)[end])
     p1 = plot_digit(out_[:, :, ind])
     p2 = plot_digit(x_[:, :, ind])
     return plot(p1, p2, kwargs...)
 end
 
 function plot_rec(out, x, xs, ind)
-    out_ = reshape(cpu(out), 28, 28, size(out)[end])
-    x_ = reshape(cpu(x), 28, 28, size(x)[end])
+    out_ = reshape(cpu(out), args[:img_size]..., size(out)[end])
+    x_ = reshape(cpu(x), args[:img_size]..., size(x)[end])
     p1 = plot_digit(out_[:, :, ind])
     p2 = plot_digit(x_[:, :, ind])
     p3 = plot([plot_digit(x[:, :, 1, ind], boundc=false) for x in xs]...)
@@ -247,8 +253,8 @@ function plot_rec(out, x, xs, ind)
 end
 
 function plot_rec(x, out::Vector, xs::Vector, ind)
-    out_ = [reshape(cpu(k), 28, 28, 1, size(k)[end]) for k in out]
-    x_ = reshape(cpu(x), 28, 28, size(x)[end])
+    out_ = [reshape(cpu(k), args[:img_size]..., 1, size(k)[end]) for k in out]
+    x_ = reshape(cpu(x), args[:img_size]..., size(x)[end])
     p1 = plot([
         begin
             xnew = 0.2f0 .* x_[:, :, ind] + x[:, :, 1, ind]
@@ -264,7 +270,7 @@ function plot_recs(x, inds; args=args)
     z = rand(args[:D], args[:π], args[:bsz]) |> gpu
     rs = [rand(args[:D], args[:π], args[:bsz]) for _ in 1:args[:seqlen]] |> gpu
     full_recs, patches, errs, xys, zs = get_loop(z, x, rs)
-    full_recs = map(x -> reshape(x, 28, 28, 1, size(x)[end]), full_recs)
+    full_recs = map(x -> reshape(x, args[:img_size]..., 1, size(x)[end]), full_recs)
 
     p = [plot_rec(x, patches, full_recs, ind) for ind in inds]
     return plot(p...; layout=(length(inds), 1), size=(600, 800))
@@ -273,9 +279,9 @@ end
 function plot_recs(x, inds; plot_seq=true, args=args)
     z = rand(args[:D], args[:π], args[:bsz]) |> gpu
     rs = [rand(args[:D], args[:π], args[:bsz]) for _ in 1:args[:seqlen]] |> gpu
-    patches, preds, errs, xys, zs = get_loop(z, x, rs)
+    preds, patches, errs, xys, zs = get_loop(z, x, rs)
     p = plot_seq ? let
-        patches_ = map(x -> reshape(x, 28, 28, 1, size(x)[end]), patches)
+        patches_ = map(x -> reshape(x, args[:img_size]..., 1, size(x)[end]), patches)
         # [plot_rec(preds[end], x, preds, ind) for ind in inds]
         [plot_rec(preds[end], x, patches_, ind) for ind in inds]
     end : [plot_rec(preds[end], x, ind) for ind in inds]
