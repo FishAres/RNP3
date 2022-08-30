@@ -13,14 +13,17 @@ using StatsBase: sample
 using Random: shuffle
 using ParameterSchedulers
 
+
 # todo - refactor so scripts share same code
 include(srcdir("double_H_vae_utils.jl"))
 include(srcdir("cifar_2lvl_vae_utils.jl"))
 
 CUDA.allowscalar(false)
-## ====
+
+## ======
+
 args = Dict(
-    :bsz => 100, :img_size => (32, 32), :img_channels => 3, :π => 32,
+    :bsz => 64, :img_size => (50, 50), :img_channels => 3, :π => 32,
     :esz => 32, :add_offset => true, :fa_out => identity, :f_z => elu,
     :asz => 6, :glimpse_len => 4, :seqlen => 5, :λ => 1.0f-3, :δL => Float32(1 / 4),
     :scale_offset => 2.8f0, :scale_offset_sense => 3.2f0,
@@ -32,19 +35,16 @@ args[:imszprod] = prod(args[:img_size])
 device!(2)
 
 dev = gpu
+## =====
 
-##=====
+full_data = load(datadir("exp_pro", "eth80_50x50.jld2"))["full_data"]
+full_data_shuffled = cat(shuffle(collect(eachslice(full_data, dims=4)))..., dims=4)
 
-train_digits, train_labels = CIFAR10(split=:train)[:]
-test_digits, test_labels = CIFAR10(split=:test)[:]
+data_train = full_data_shuffled[:, :, :, 1:3100]
+data_test = full_data_shuffled[:, :, :, 3101:end]
 
-train_labels = Float32.(Flux.onehotbatch(train_labels, 0:9))
-test_labels = Float32.(Flux.onehotbatch(test_labels, 0:9))
-
-train_loader = DataLoader((train_digits |> dev), batchsize=args[:bsz], shuffle=true, partial=false)
-test_loader = DataLoader((test_digits |> dev), batchsize=args[:bsz], shuffle=true, partial=false)
-
-x = first(train_loader)
+train_loader = DataLoader(data_train |> dev, batchsize=args[:bsz], shuffle=true, partial=false)
+test_loader = DataLoader(data_test |> dev, batchsize=args[:bsz], shuffle=true, partial=false)
 
 ## =====
 dev = has_cuda() ? gpu : cpu
@@ -59,9 +59,8 @@ const diag_off = cat(1.0f-6 .* diag_vec..., dims=3) |> dev
 ## =====
 
 # todo don't bind RNN size to args[:π]
-
-args[:π] = 128
-args[:depth_Hx] = 7
+args[:π] = 96
+args[:depth_Hx] = 6
 args[:D] = Normal(0.0f0, 1.0f0)
 
 l_enc_za_z = (args[:π] + args[:asz]) * args[:π] # encoder (z_t, a_t) -> z_t+1
@@ -102,12 +101,12 @@ Ha = Chain(
 
 
 RN2 = Chain(
-    Dense(args[:π], 128,),
-    LayerNorm(128, elu),
-    LSTM(128, 128,),
+    Dense(args[:π], 64,),
+    LayerNorm(64, elu),
+    LSTM(64, 64,),
     Split(
-        Dense(128, args[:π],),
-        Dense(128, args[:π],),
+        Dense(64, args[:π],),
+        Dense(64, args[:π],),
     )
 ) |> gpu
 
@@ -115,16 +114,15 @@ z0 = rand(args[:D], args[:π], args[:bsz]) |> gpu
 
 ps = Flux.params(Hx, Ha, RN2, z0)
 
-
 ## ======
 
-# inds = sample(1:args[:bsz], 6, replace=false)
-# p = plot_recs(sample_loader(test_loader), inds)
+inds = sample(1:args[:bsz], 6, replace=false)
+p = plot_recs(sample_loader(test_loader), inds)
 
 ## =====
 
 save_folder = "enc_rnn_2lvl"
-alias = "2lvl_double_H_cifar_vae_z0emb_2"
+alias = "2lvl_double_H_eth80_50x50_vae_z0emb_2"
 save_dir = get_save_dir(save_folder, alias)
 
 ## =====
@@ -132,7 +130,7 @@ save_dir = get_save_dir(save_folder, alias)
 args[:seqlen] = 4
 args[:glimpse_len] = 4
 args[:scale_offset] = 2.0f0
-args[:scale_offset_sense] = 1.4f0
+args[:scale_offset_sense] = 2.0f0
 
 # args[:δL] = round(Float32(1 / args[:seqlen]), digits=3)
 args[:δL] = 0.0f0

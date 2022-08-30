@@ -18,16 +18,16 @@ include(srcdir("double_H_vae_utils.jl"))
 CUDA.allowscalar(false)
 ## ====
 args = Dict(
-    :bsz => 64, :img_size => (28, 28), :π => 32,
+    :bsz => 64, :img_size => (28, 28), :π => 32, :img_channels => 1,
     :esz => 32, :add_offset => true, :fa_out => identity, :f_z => elu,
     :asz => 6, :glimpse_len => 4, :seqlen => 5, :λ => 1.0f-3, :δL => Float32(1 / 4),
     :scale_offset => 2.8f0, :scale_offset_sense => 3.2f0,
-    :λf => 0.167f0, :D => Normal(0.0f0, 1.0f0),
+    :λf => 0.167f0, :D => Normal(0.0f0, 1.0f0), :z_rnn => "LSTM"
 )
 args[:imszprod] = prod(args[:img_size])
 ## =====
 
-device!(2)
+device!(0)
 
 dev = gpu
 
@@ -169,8 +169,6 @@ function get_loop(z, x, rs; args=args)
 end
 
 
-
-
 function train_model(opt, ps, train_data; args=args, epoch=1, logger=nothing, D=args[:D])
     progress_tracker = Progress(length(train_data), 1, "Training epoch $epoch :)")
     losses = zeros(length(train_data))
@@ -220,7 +218,7 @@ end
 
 # todo don't bind RNN size to args[:π]
 
-args[:π] = 128
+args[:π] = 96
 args[:D] = Normal(0.0f0, 1.0f0)
 
 l_enc_za_z = (args[:π] + args[:asz]) * args[:π] # encoder (z_t, a_t) -> z_t+1
@@ -257,18 +255,15 @@ Ha = Chain(
     LayerNorm(64, elu),
     Dense(64, 64),
     LayerNorm(64, elu),
-    Dense(64, 64),
-    LayerNorm(64, elu),
-    Dense(64, 64),
-    LayerNorm(64, elu),
     Dense(64, sum(Ha_bounds) + args[:asz], bias=false),
 ) |> gpu
 
+zrnn = args[:z_rnn] == "LSTM" ? LSTM : GRU
 
 RN2 = Chain(
     Dense(args[:π], 64,),
     LayerNorm(64, elu),
-    LSTM(64, 64,),
+    zrnn(64, 64,),
     Split(
         Dense(64, args[:π],),
         Dense(64, args[:π],),
@@ -277,16 +272,20 @@ RN2 = Chain(
 
 z0 = rand(args[:D], args[:π], args[:bsz]) |> gpu
 ps = Flux.params(Hx, Ha, RN2, z0)
+## ====
+# modelpath = "saved_models/enc_rnn_2lvl/2lvl_double_H_omni_vae_z0emb/add_offset=true_asz=6_bsz=64_esz=32_glimpse_len=5_img_channels=1_imszprod=784_scale_offset=2.0_scale_offset_sense=2.2_seqlen=4_z_rnn=LSTM_α=1.0_β=0.1_δL=0.0_η=0.0001_λ=0.001_λf=1.0_π=96_123eps.bson"
+
+# Hx, Ha, RN2, z0 = load(modelpath)[:model] |> gpu
 
 ## ======
 
-inds = sample(1:args[:bsz], 6, replace=false)
-p = plot_recs(sample_loader(test_loader), inds)
+# inds = sample(1:args[:bsz], 6, replace=false)
+# p = plot_recs(sample_loader(test_loader), inds)
 
 ## =====
 
 save_folder = "enc_rnn_2lvl"
-alias = "2lvl_double_H_omni_vae_z0emb_05s"
+alias = "2lvl_double_H_omni_vae_z0emb_3"
 save_dir = get_save_dir(save_folder, alias)
 
 ## =====
@@ -318,10 +317,10 @@ lg = new_logger(joinpath(save_folder, alias), args)
 
 begin
     Ls = []
-    for epoch in 1:400
-        if (epoch % 40 == 0 && epoch > 50)
-            opt.eta = 0.6 * opt.eta
-
+    for epoch in 1:1000
+        if epoch > 80 && epoch % 80 == 0
+            opt.eta = 0.33 * opt.eta
+        end
 
         ls = train_model(opt, ps, train_loader; epoch=epoch, logger=lg)
         inds = sample(1:args[:bsz], 6, replace=false)
@@ -333,10 +332,12 @@ begin
         log_value(lg, "test_loss", L)
         @info "Test loss: $L"
         push!(Ls, ls)
-        if epoch % 25 == 0
+        if epoch % 50 == 0
             save_model((Hx, Ha, RN2, z0), joinpath(save_folder, alias, savename(args) * "_$(epoch)eps"))
         end
     end
 end
 
 ## ====
+
+# save_model((Hx, Ha, RN2, z0), joinpath(save_folder, alias, savename(args) * "_123eps"))
