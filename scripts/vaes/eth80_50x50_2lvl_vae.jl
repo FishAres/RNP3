@@ -32,7 +32,7 @@ args = Dict(
 args[:imszprod] = prod(args[:img_size])
 ## =====
 
-device!(2)
+device!(1)
 
 dev = gpu
 ## =====
@@ -90,10 +90,10 @@ Ha = Chain(
     LayerNorm(args[:π],),
     Dense(args[:π], 64),
     LayerNorm(64, elu),
-    Dense(64, 64),
-    LayerNorm(64, elu),
-    Dense(64, 64),
-    LayerNorm(64, elu),
+    # Dense(64, 64),
+    # LayerNorm(64, elu),
+    # Dense(64, 64),
+    # LayerNorm(64, elu),
     Dense(64, 64),
     LayerNorm(64, elu),
     Dense(64, sum(Ha_bounds) + args[:asz], bias=false),
@@ -153,10 +153,10 @@ lg = new_logger(joinpath(save_folder, alias), args)
 
 ## ====
 begin
-    Ls = []
-    for epoch in 1:200
-        if epoch > 40
-            opt.eta = 1e-5
+    # Ls = []
+    for epoch in 1:1000
+        if epoch % 80 == 0
+            opt.eta = 0.33 * opt.eta
         end
         ls = train_model(opt, ps, train_loader; epoch=epoch, logger=lg)
         println("z0 mean: ", mean(z0), ", ", "std: ", std(z0))
@@ -168,8 +168,8 @@ begin
 
         log_value(lg, "test_loss", L)
         @info "Test loss: $L"
-        push!(Ls, ls)
-        if epoch % 25 == 0
+        # push!(Ls, ls)
+        if epoch % 50 == 0
             save_model((Hx, Ha, RN2, z0), joinpath(save_folder, alias, savename(args) * "_$(epoch)eps"))
         end
     end

@@ -236,47 +236,49 @@ l_dec_a = args[:asz] * args[:π] + args[:asz] # decoder z -> a, with bias
 
 Ha_bounds = [l_enc_za_a; l_fa; l_dec_a]
 
-Hx = Chain(
-    LayerNorm(args[:π],),
-    Dense(args[:π], 64),
-    LayerNorm(64, elu),
-    Dense(64, 64),
-    LayerNorm(64, elu),
-    Dense(64, 64),
-    LayerNorm(64, elu),
-    Dense(64, 64),
-    LayerNorm(64, elu),
-    Dense(64, sum(Hx_bounds) + args[:π], bias=false),
-) |> gpu
+# Hx = Chain(
+#     LayerNorm(args[:π],),
+#     Dense(args[:π], 64),
+#     LayerNorm(64, elu),
+#     Dense(64, 64),
+#     LayerNorm(64, elu),
+#     Dense(64, 64),
+#     LayerNorm(64, elu),
+#     Dense(64, 64),
+#     LayerNorm(64, elu),
+#     Dense(64, sum(Hx_bounds) + args[:π], bias=false),
+# ) |> gpu
 
-Ha = Chain(
-    LayerNorm(args[:π],),
-    Dense(args[:π], 64),
-    LayerNorm(64, elu),
-    Dense(64, 64),
-    LayerNorm(64, elu),
-    Dense(64, sum(Ha_bounds) + args[:asz], bias=false),
-) |> gpu
+# Ha = Chain(
+#     LayerNorm(args[:π],),
+#     Dense(args[:π], 64),
+#     LayerNorm(64, elu),
+#     Dense(64, 64),
+#     LayerNorm(64, elu),
+#     Dense(64, sum(Ha_bounds) + args[:asz], bias=false),
+# ) |> gpu
 
-zrnn = args[:z_rnn] == "LSTM" ? LSTM : GRU
+# zrnn = args[:z_rnn] == "LSTM" ? LSTM : GRU
 
-RN2 = Chain(
-    Dense(args[:π], 64,),
-    LayerNorm(64, elu),
-    zrnn(64, 64,),
-    Split(
-        Dense(64, args[:π],),
-        Dense(64, args[:π],),
-    )
-) |> gpu
+# RN2 = Chain(
+#     Dense(args[:π], 64,),
+#     LayerNorm(64, elu),
+#     zrnn(64, 64,),
+#     Split(
+#         Dense(64, args[:π],),
+#         Dense(64, args[:π],),
+#     )
+# ) |> gpu
 
-z0 = rand(args[:D], args[:π], args[:bsz]) |> gpu
-ps = Flux.params(Hx, Ha, RN2, z0)
+# z0 = rand(args[:D], args[:π], args[:bsz]) |> gpu
+# ps = Flux.params(Hx, Ha, RN2, z0)
 ## ====
 # modelpath = "saved_models/enc_rnn_2lvl/2lvl_double_H_omni_vae_z0emb/add_offset=true_asz=6_bsz=64_esz=32_glimpse_len=5_img_channels=1_imszprod=784_scale_offset=2.0_scale_offset_sense=2.2_seqlen=4_z_rnn=LSTM_α=1.0_β=0.1_δL=0.0_η=0.0001_λ=0.001_λf=1.0_π=96_123eps.bson"
 
-# Hx, Ha, RN2, z0 = load(modelpath)[:model] |> gpu
+modelpath = "saved_models/enc_rnn_2lvl/2lvl_double_H_omni_vae_z0emb_3/add_offset=true_asz=6_bsz=64_esz=32_glimpse_len=5_img_channels=1_imszprod=784_scale_offset=2.0_scale_offset_sense=2.6_seqlen=4_z_rnn=LSTM_α=1.0_β=0.1_δL=0.0_η=0.0001_λ=0.001_λf=1.0_π=96_700eps.bson"
 
+Hx, Ha, RN2, z0 = load(modelpath)[:model] |> gpu
+ps = Flux.params(Hx, Ha, RN2, z0)
 ## ======
 
 # inds = sample(1:args[:bsz], 6, replace=false)
