@@ -37,9 +37,12 @@ all_chars = load("../Recur_generative/data/exp_pro/omniglot.jld2")
 xs = shuffle(vcat((all_chars[key] for key in keys(all_chars))...))
 x_batches = batch.(partition(xs, args[:bsz]))
 
-ntrain, ntest = 286, 15
-xs_train = flatten.(x_batches[1:ntrain] |> gpu)
-xs_test = flatten.(x_batches[ntrain+1:ntrain+ntest] |> gpu)
+test_chars = load("../Recur_generative/data/exp_pro/omniglot_eval.jld2")
+xs = shuffle(vcat((test_chars[key] for key in keys(test_chars))...))
+test_batches = batch.(partition(xs, args[:bsz]))
+
+xs_train = flatten.(x_batches |> gpu)
+xs_test = flatten.(test_batches |> gpu)
 x = xs_test[1]
 
 train_loader, test_loader = xs_train, xs_test
@@ -69,6 +72,7 @@ function forward_pass(z1, a1, models, x; scale_offset=args[:scale_offset])
     patch_t = zoom_in2d(x, a1, sampling_grid; scale_offset=scale_offset) |> flatten
 
     ϵ = patch_t .- x̂
+
     Δz = Enc_ϵ_z(ϵ)
     return z1, a1, x̂, patch_t, ϵ, Δz
 end
@@ -280,15 +284,6 @@ Hx, Ha, RN2, z0 = load(modelpath)[:model] |> gpu
 ps = Flux.params(Hx, Ha, RN2, z0)
 ## ======
 
-# inds = sample(1:args[:bsz], 6, replace=false)
-# p = plot_recs(sample_loader(test_loader), inds)
-
-## =====
-
-save_folder = "enc_rnn_2lvl"
-alias = "2lvl_double_H_omni_vae_z0emb_3"
-save_dir = get_save_dir(save_folder, alias)
-
 ## =====
 # todo - separate sensing network?
 args[:seqlen] = 4
@@ -304,41 +299,10 @@ args[:λ] = 0.001f0
 args[:α] = 1.0f0
 args[:β] = 0.1f0
 
+## =====
 
-args[:η] = 1e-4
-opt = ADAM(args[:η])
-lg = new_logger(joinpath(save_folder, alias), args)
-# todo try sinusoidal lr schedule
+test_model(test_loader)
+test_model(train_loader)
 
-# using ParameterSchedulers
-# using ParameterSchedulers: Stateful
-# s = Stateful(SinExp(args[:η], 4e-7, 20, 0.99))
-
-## ====
-
-begin
-    Ls = []
-    for epoch in 1:1000
-        if epoch > 80 && epoch % 80 == 0
-            opt.eta = 0.33 * opt.eta
-        end
-
-        ls = train_model(opt, ps, train_loader; epoch=epoch, logger=lg)
-        inds = sample(1:args[:bsz], 6, replace=false)
-        p = plot_recs(sample_loader(test_loader), inds)
-        display(p)
-        log_image(lg, "recs_$(epoch)", p)
-        L = test_model(test_loader)
-
-        log_value(lg, "test_loss", L)
-        @info "Test loss: $L"
-        push!(Ls, ls)
-        if epoch % 50 == 0
-            save_model((Hx, Ha, RN2, z0), joinpath(save_folder, alias, savename(args) * "_$(epoch)eps"))
-        end
-    end
-end
-
-## ====
-
-# save_model((Hx, Ha, RN2, z0), joinpath(save_folder, alias, savename(args) * "_123eps"))
+inds = sample(1:args[:bsz], 6, replace=false)
+p = plot_recs(sample_loader(test_loader), inds)

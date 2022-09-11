@@ -7,6 +7,7 @@ using Flux, Zygote, CUDA
 using IterTools: partition, iterated
 using Flux: batch, unsqueeze, flatten
 using Flux.Data: DataLoader
+using FFTW
 using Distributions
 using StatsBase: sample
 using Random: shuffle
@@ -33,6 +34,7 @@ dev = gpu
 
 ##=====
 
+
 all_chars = load("../Recur_generative/data/exp_pro/omniglot.jld2")
 xs = shuffle(vcat((all_chars[key] for key in keys(all_chars))...))
 x_batches = batch.(partition(xs, args[:bsz]))
@@ -56,7 +58,7 @@ const diag_off = cat(1.0f-6 .* diag_vec..., dims=3) |> dev
 ## =====
 
 "one iteration"
-function forward_pass(z1, a1, models, x; scale_offset=args[:scale_offset])
+function forward_pass(z1, a1, models, x; ft=false, scale_offset=args[:scale_offset])
     f_state, f_policy, err_rnn, Enc_za_z, Enc_za_a, Enc_ϵ_z, Dec_z_x̂, Dec_z_a = models
 
     za = vcat(z1, a1) # todo parallel layer?
@@ -66,9 +68,13 @@ function forward_pass(z1, a1, models, x; scale_offset=args[:scale_offset])
     a1 = Dec_z_a(f_policy(ea))
 
     x̂ = Dec_z_x̂(z1)
-    patch_t = zoom_in2d(x, a1, sampling_grid; scale_offset=scale_offset) |> flatten
-
+    patch_t = if ft
+        zoom_in2d(abs2.(fft(x)), a1, sampling_grid; scale_offset=scale_offset) |> flatten
+    else
+        zoom_in2d(x, a1, sampling_grid; scale_offset=scale_offset) |> flatten
+    end
     ϵ = patch_t .- x̂
+
     Δz = Enc_ϵ_z(ϵ)
     return z1, a1, x̂, patch_t, ϵ, Δz
 end
@@ -95,7 +101,7 @@ function model_loss(z, x, rs; args=args)
     θsa = Ha(z)
     models, z0, a0 = get_models(θsz, θsa; args=args)
     # is z0, a0 necessary?
-    z1, a1, x̂, patch_t, ϵ, Δz = forward_pass(z0, a0, models, x; scale_offset=args[:scale_offset_sense])
+    z1, a1, x̂, patch_t, ϵ, Δz = forward_pass(z0, a0, models, x; ft=true, scale_offset=args[:scale_offset_sense])
     out_1, err_emb_1 = full_sequence(z1, patch_t; scale_offset=args[:scale_offset_sense])
     out_full, err_emb_full = full_sequence(models, z0, a0, x; scale_offset=args[:scale_offset])
 
@@ -109,7 +115,7 @@ function model_loss(z, x, rs; args=args)
         models, z0, a0 = get_models(θsz, θsa; args=args)
 
         out_full, err_emb_full = full_sequence(models, z0, a0, x; scale_offset=args[:scale_offset])
-        z1, a1, x̂, patch_t, ϵ, Δz = forward_pass(z1, a1, models, x; scale_offset=args[:scale_offset_sense])
+        z1, a1, x̂, patch_t, ϵ, Δz = forward_pass(z1, a1, models, x; ft=true, scale_offset=args[:scale_offset_sense])
         out_1, err_emb_1 = full_sequence(z1, patch_t; scale_offset=args[:scale_offset_sense])
 
         # Lpatch += Flux.mse(flatten(x̂), flatten(patch_t))
@@ -134,7 +140,7 @@ function get_loop(z, x, rs; args=args)
     θsa = Ha(z)
     models, z0, a0 = get_models(θsz, θsa; args=args)
 
-    z1, a1, x̂, patch_t, ϵ, Δz = forward_pass(z0, a0, models, x; scale_offset=args[:scale_offset_sense])
+    z1, a1, x̂, patch_t, ϵ, Δz = forward_pass(z0, a0, models, x; ft=true, scale_offset=args[:scale_offset_sense])
     out_full, err_emb_full = full_sequence(models, z0, a0, x)
     out_1, err_emb_1 = full_sequence(z1, patch_t; scale_offset=args[:scale_offset_sense])
     sense_patch = sample_patch(out_1 .+ 0.1f0, a1, sampling_grid; scale_offset=args[:scale_offset_sense])
@@ -149,7 +155,7 @@ function get_loop(z, x, rs; args=args)
         models, z0, a0 = get_models(θsz, θsa; args=args)
 
         out_full, err_emb_full = full_sequence(models, z0, a0, x)
-        z1, a1, x̂, patch_t, ϵ, Δz = forward_pass(z1, a1, models, x; scale_offset=args[:scale_offset_sense])
+        z1, a1, x̂, patch_t, ϵ, Δz = forward_pass(z1, a1, models, x; ft=true, scale_offset=args[:scale_offset_sense])
         out_1, err_emb_1 = full_sequence(z1, patch_t; scale_offset=args[:scale_offset_sense])
         sense_patch = sample_patch(out_1 .+ 0.1f0, a1, sampling_grid; scale_offset=args[:scale_offset_sense])
         push_to_arrays!((out_full, sense_patch, ϵ, z, a1, patch_t), outputs)
@@ -235,58 +241,51 @@ l_dec_a = args[:asz] * args[:π] + args[:asz] # decoder z -> a, with bias
 
 Ha_bounds = [l_enc_za_a; l_fa; l_dec_a]
 
-# Hx = Chain(
-#     LayerNorm(args[:π],),
-#     Dense(args[:π], 64),
-#     LayerNorm(64, elu),
-#     Dense(64, 64),
-#     LayerNorm(64, elu),
-#     Dense(64, 64),
-#     LayerNorm(64, elu),
-#     Dense(64, 64),
-#     LayerNorm(64, elu),
-#     Dense(64, sum(Hx_bounds) + args[:π], bias=false),
-# ) |> gpu
+Hx = Chain(
+    LayerNorm(args[:π],),
+    Dense(args[:π], 64),
+    LayerNorm(64, elu),
+    Dense(64, 64),
+    LayerNorm(64, elu),
+    Dense(64, 64),
+    LayerNorm(64, elu),
+    Dense(64, 64),
+    LayerNorm(64, elu),
+    Dense(64, sum(Hx_bounds) + args[:π], bias=false),
+) |> gpu
 
-# Ha = Chain(
-#     LayerNorm(args[:π],),
-#     Dense(args[:π], 64),
-#     LayerNorm(64, elu),
-#     Dense(64, 64),
-#     LayerNorm(64, elu),
-#     Dense(64, sum(Ha_bounds) + args[:asz], bias=false),
-# ) |> gpu
+Ha = Chain(
+    LayerNorm(args[:π],),
+    Dense(args[:π], 64),
+    LayerNorm(64, elu),
+    Dense(64, 64),
+    LayerNorm(64, elu),
+    Dense(64, sum(Ha_bounds) + args[:asz], bias=false),
+) |> gpu
 
-# zrnn = args[:z_rnn] == "LSTM" ? LSTM : GRU
+zrnn = args[:z_rnn] == "LSTM" ? LSTM : GRU
 
-# RN2 = Chain(
-#     Dense(args[:π], 64,),
-#     LayerNorm(64, elu),
-#     zrnn(64, 64,),
-#     Split(
-#         Dense(64, args[:π],),
-#         Dense(64, args[:π],),
-#     )
-# ) |> gpu
+RN2 = Chain(
+    Dense(args[:π], 64,),
+    LayerNorm(64, elu),
+    zrnn(64, 64,),
+    Split(
+        Dense(64, args[:π],),
+        Dense(64, args[:π],),
+    )
+) |> gpu
 
-# z0 = rand(args[:D], args[:π], args[:bsz]) |> gpu
-# ps = Flux.params(Hx, Ha, RN2, z0)
-## ====
-# modelpath = "saved_models/enc_rnn_2lvl/2lvl_double_H_omni_vae_z0emb/add_offset=true_asz=6_bsz=64_esz=32_glimpse_len=5_img_channels=1_imszprod=784_scale_offset=2.0_scale_offset_sense=2.2_seqlen=4_z_rnn=LSTM_α=1.0_β=0.1_δL=0.0_η=0.0001_λ=0.001_λf=1.0_π=96_123eps.bson"
-
-modelpath = "saved_models/enc_rnn_2lvl/2lvl_double_H_omni_vae_z0emb_3/add_offset=true_asz=6_bsz=64_esz=32_glimpse_len=5_img_channels=1_imszprod=784_scale_offset=2.0_scale_offset_sense=2.6_seqlen=4_z_rnn=LSTM_α=1.0_β=0.1_δL=0.0_η=0.0001_λ=0.001_λf=1.0_π=96_700eps.bson"
-
-Hx, Ha, RN2, z0 = load(modelpath)[:model] |> gpu
+z0 = rand(args[:D], args[:π], args[:bsz]) |> gpu
 ps = Flux.params(Hx, Ha, RN2, z0)
-## ======
+## ====
 
-# inds = sample(1:args[:bsz], 6, replace=false)
-# p = plot_recs(sample_loader(test_loader), inds)
+inds = sample(1:args[:bsz], 6, replace=false)
+p = plot_recs(sample_loader(test_loader), inds)
 
 ## =====
 
 save_folder = "enc_rnn_2lvl"
-alias = "2lvl_double_H_omni_vae_z0emb_3"
+alias = "2lvl_double_H_omni_vae_z0emb_fft"
 save_dir = get_save_dir(save_folder, alias)
 
 ## =====
@@ -294,7 +293,7 @@ save_dir = get_save_dir(save_folder, alias)
 args[:seqlen] = 4
 args[:glimpse_len] = 5
 args[:scale_offset] = 2.0f0
-args[:scale_offset_sense] = 2.6f0
+args[:scale_offset_sense] = 2.8f0
 
 # args[:δL] = round(Float32(1 / args[:seqlen]), digits=3)
 args[:δL] = 0.0f0
@@ -318,7 +317,7 @@ lg = new_logger(joinpath(save_folder, alias), args)
 
 begin
     Ls = []
-    for epoch in 1:1000
+    for epoch in 1:40
         if epoch > 80 && epoch % 80 == 0
             opt.eta = 0.33 * opt.eta
         end

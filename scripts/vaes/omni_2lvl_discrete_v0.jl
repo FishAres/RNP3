@@ -27,7 +27,7 @@ args = Dict(
 args[:imszprod] = prod(args[:img_size])
 ## =====
 
-device!(0)
+device!(1)
 
 dev = gpu
 
@@ -55,6 +55,14 @@ const diag_mat = cat(diag_vec..., dims=3) |> dev
 const diag_off = cat(1.0f-6 .* diag_vec..., dims=3) |> dev
 ## =====
 
+r = softmax(randn(Float32, args[:π], args[:bsz])) |> dev
+
+ek = randn(Float32, args[:π], args[:bsz]) |> dev
+
+argmin(r - ek, dims=1)
+
+
+## =====
 "one iteration"
 function forward_pass(z1, a1, models, x; scale_offset=args[:scale_offset])
     f_state, f_policy, err_rnn, Enc_za_z, Enc_za_a, Enc_ϵ_z, Dec_z_x̂, Dec_z_a = models
