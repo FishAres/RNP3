@@ -27,20 +27,43 @@ args[:imzprod] = prod(args[:img_size])
 
 ## =====
 
-device!(1)
+device!(0)
 
 dev = gpu
 
 ##=====
-train_digits, train_labels = MNIST(split=:train)[:]
-test_digits, test_labels = MNIST(split=:test)[:]
+train_digits, train_labels = Omniglot(split=:train)[:]
+test_digits, test_labels = Omniglot(split=:test)[:]
 
-train_labels = Float32.(Flux.onehotbatch(train_labels, 0:9))
-test_labels = Float32.(Flux.onehotbatch(test_labels, 0:9))
+train_digits = 1.0f0 .- imresize(train_digits, (28, 28))
+test_digits = 1.0f0 .- imresize(test_digits, (28, 28))
 
-train_loader = DataLoader((train_digits |> dev), batchsize=args[:bsz], shuffle=true, partial=false)
-test_loader = DataLoader((test_digits |> dev), batchsize=args[:bsz], shuffle=true, partial=false)
+# binarize
 
+function binarize(x; thresh=0.5f0)
+    x[x.<=thresh] .= 0.0f0
+    x[x.>thresh] .= 1.0f0
+    return x
+end
+
+## ===== filter
+train_chars = zeros(Float32, size(train_digits))
+test_chars = zeros(Float32, size(test_digits))
+
+Threads.@threads for i in 1:size(train_digits, 3)
+    train_chars[:, :, i] = imfilter(train_digits[:, :, i], Kernel.gaussian(0.5f0))
+end
+
+Threads.@threads for i in 1:size(test_digits, 3)
+    test_chars[:, :, i] = imfilter(test_digits[:, :, i], Kernel.gaussian(0.5f0))
+end
+## =====
+
+# train_labels = Float32.(Flux.onehotbatch(train_labels, 0:9))
+# test_labels = Float32.(Flux.onehotbatch(test_labels, 0:9))
+
+train_loader = DataLoader(train_chars |> dev, batchsize=args[:bsz], shuffle=true, partial=false)
+test_loader = DataLoader(test_chars |> dev, batchsize=args[:bsz], shuffle=true, partial=false)
 
 ## =====
 dev = has_cuda() ? gpu : cpu
@@ -70,11 +93,40 @@ function get_fpolicy_models(θs, Ha_bounds; args=args)
     return (Enc_za_a, f_policy, Dec_z_a), a0
 end
 
+function init_H!(H; f=0.4f0)
+    for p in Flux.params(H)
+        p = f * p
+    end
+end
+
+function train_model(opt, ps, train_data; args=args, epoch=1, logger=nothing, D=args[:D])
+    progress_tracker = Progress(length(train_data), 1, "Training epoch $epoch :)")
+    losses = zeros(length(train_data))
+    # initial z's drawn from N(0,1)
+    rs = [rand(D, args[:π], args[:bsz]) for _ in 1:length(train_data)] |> gpu
+    for (i, x) in enumerate(train_data)
+        loss, grad = withgradient(ps) do
+            rec_loss, klqp = model_loss(x, rs[i])
+            logger !== nothing && Zygote.ignore() do
+                log_value(lg, "rec_loss", rec_loss)
+                log_value(lg, "KL loss", klqp)
+            end
+            full_loss = args[:α] * rec_loss + args[:β] * klqp
+            full_loss + args[:λ] * (norm(Flux.params(Hx)) + norm(Flux.params(Ha)))
+        end
+        foreach(x -> clamp!(x, -1.0f0, 1.0f0), grad)
+        Flux.update!(opt, ps, grad)
+        losses[i] = loss
+        ProgressMeter.next!(progress_tracker; showvalues=[(:loss, loss)])
+    end
+    return losses
+end
+
 ## ====
 
 # todo don't bind RNN size to args[:π]
 
-args[:π] = 32
+args[:π] = 96
 
 l_enc_za_z = (args[:π] + args[:asz]) * args[:π] # encoder (z_t, a_t) -> z_t+1
 l_fx = get_rnn_θ_sizes(args[:π], args[:π])
@@ -116,9 +168,11 @@ Ha = Chain(
 Encoder = let
     enc1 = Chain(
         x -> reshape(x, 28, 28, 1, :),
-        Conv((5, 5), 1 => 32, relu, pad=(1, 1)),
-        Conv((5, 5), 32 => 32, relu, pad=(1, 1)),
-        Conv((5, 5), 32 => 32, relu, pad=(1, 1)),
+        Conv((5, 5), 1 => 32),
+        BatchNorm(32, relu),
+        Conv((5, 5), 32 => 32),
+        BatchNorm(32, relu),
+        BasicBlock(32 => 32, +),
         BasicBlock(32 => 32, +),
         BasicBlock(32 => 32, +),
         BasicBlock(32 => 32, +),
@@ -140,6 +194,7 @@ Encoder = let
         )
     )
 end |> gpu
+
 ps = Flux.params(Hx, Ha, Encoder)
 
 ## ======
@@ -150,7 +205,7 @@ p = plot_recs(sample_loader(test_loader), inds)
 ## =====
 
 save_folder = "gen_2lvl"
-alias = "double_H_mnist_generative_v0"
+alias = "double_H_omni_generative_v0"
 save_dir = get_save_dir(save_folder, alias)
 
 ## =====
@@ -196,72 +251,3 @@ begin
     end
 end
 
-
-## ======
-
-function full_sequence2(models::Tuple, z0, a0, x; args=args, scale_offset=args[:scale_offset])
-    f_state, f_policy, Enc_za_z, Enc_za_a, Dec_z_x̂, Dec_z_a = models
-    z1, a1, x̂, patch_t = forward_pass(z0, a0, models, x; scale_offset=scale_offset)
-    out_small = full_sequence(z1, patch_t)
-    out = sample_patch(out_small, a1, sampling_grid)
-    for t = 2:args[:seqlen]
-        z1, a1, x̂, patch_t = forward_pass(z1, a1, models, x; scale_offset=scale_offset)
-        out_small = full_sequence(z1, patch_t)
-        out += sample_patch(out_small, a1, sampling_grid)
-    end
-    return out
-end
-
-function full_sequence2(z::AbstractArray, x; args=args, scale_offset=args[:scale_offset])
-    θsz = Hx(z)
-    θsa = Ha(z)
-    models, z0, a0 = get_models(θsz, θsa; args=args)
-    return full_sequence2(models, z0, a0, x; args=args, scale_offset=scale_offset)
-end
-
-
-
-"output sequence: full recs, local recs, xys (a1), patches_t"
-function get_loop2(x; args=args)
-    outputs = patches, recs, as, patches_t = [], [], [], [], []
-    r = rand(args[:D], args[:π], args[:bsz]) |> gpu
-    μ, logvar = Encoder(x)
-    z = sample_z(μ, logvar, r)
-    θsz = Hx(z)
-    θsa = Ha(z)
-    models, z0, a0 = get_models(θsz, θsa; args=args)
-    z1, a1, x̂, patch_t = forward_pass(z0, a0, models, x; scale_offset=args[:scale_offset])
-    out_small = full_sequence2(z1, patch_t)
-    out = sample_patch(out_small, a1, sampling_grid)
-    push_to_arrays!((out, out_small, a1, patch_t), outputs)
-    for t = 2:args[:seqlen]
-        z1, a1, x̂, patch_t = forward_pass(z1, a1, models, x; scale_offset=args[:scale_offset])
-        out_small = full_sequence2(z1, patch_t)
-        out += sample_patch(out_small, a1, sampling_grid)
-        push_to_arrays!((out, out_small, a1, patch_t), outputs)
-    end
-    return outputs
-end
-
-function plot_recs(x, inds; plot_seq=true, args=args, loop_fun=get_loop)
-    full_recs, patches, xys, patches_t = loop_fun(x)
-    p = plot_seq ? let
-        patches_ = map(x -> reshape(x, 28, 28, 1, size(x)[end]), patches)
-        [plot_rec(full_recs[end], x, patches_, ind) for ind in inds]
-    end : [plot_rec(full_recs[end], x, ind) for ind in inds]
-
-    return plot(p...; layout=(length(inds), 1), size=(600, 800))
-end
-
-## =====
-
-
-inds = sample(1:args[:bsz], 6, replace=false)
-x_ = sample_loader(test_loader)
-
-begin
-    args[:scale_offset] = 2f0
-    p1 = plot_recs(x_, inds; loop_fun=get_loop)
-    p2 = plot_recs(x_, inds; loop_fun=get_loop2)
-    plot(p1, p2, size=(1200, 1200))
-end

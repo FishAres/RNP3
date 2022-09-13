@@ -55,6 +55,7 @@ diag_vec = [[1.0f0 0.0f0; 0.0f0 1.0f0] for _ in 1:args[:bsz]]
 const diag_mat = cat(diag_vec..., dims=3) |> dev
 const diag_off = cat(1.0f-6 .* diag_vec..., dims=3) |> dev
 ## =====
+
 function get_fstate_models(θs, Hx_bounds; args=args, fz=args[:f_z])
     inds = Zygote.ignore() do
         [0; cumsum([Hx_bounds...; args[:π]])]
@@ -63,7 +64,7 @@ function get_fstate_models(θs, Hx_bounds; args=args, fz=args[:f_z])
 
     Enc_za_z = Chain(HyDense(args[:π] + args[:asz], args[:π], Θ[1], elu), flatten)
 
-    f_state = ps_to_RN(get_rn_θs(Θ[2], args[:π], args[:π]); f_out=fz)
+    f_state = ps_to_RN(get_rn_θs(Θ[2], args[:π], args[:π]); f_out=elu)
 
     # rgb
     Dec_z_x̂r = Chain(HyDense(args[:π], args[:imszprod], Θ[3], relu6), flatten)
@@ -155,6 +156,8 @@ Hx = Chain(
     LayerNorm(64, elu),
     Dense(64, 64),
     LayerNorm(64, elu),
+    Dense(64, 64),
+    LayerNorm(64, elu),
     Dense(64, sum(Hx_bounds) + args[:π], bias=false),
 ) |> gpu
 
@@ -205,22 +208,17 @@ ps = Flux.params(Hx, Ha, Encoder)
 
 ## ======
 
-inds = sample(1:args[:bsz], 6, replace=false)
-p = plot_recs(sample_loader(test_loader), inds)
-
-## =====
-
 save_folder = "gen_2lvl"
-alias = "double_H_cifar_generative_v01"
+alias = "double_H_cifar_generative_v0"
 save_dir = get_save_dir(save_folder, alias)
 
 ## =====
 # todo - separate sensing network?
 args[:seqlen] = 4
-args[:scale_offset] = 0.5f0
+args[:scale_offset] = 1.5f0
 
-# args[:λpatch] = Float32(1 / args[:seqlen])
 args[:λpatch] = Float32(1 / 8)
+args[:λpatch] = 0.0f0
 args[:λf] = 1.0f0
 args[:λ] = 0.001f0
 args[:D] = Normal(0.0f0, 1.0f0)
@@ -234,10 +232,16 @@ opt = ADAM(args[:η])
 lg = new_logger(joinpath(save_folder, alias), args)
 
 ## ====
+
+inds = sample(1:args[:bsz], 6, replace=false)
+p = plot_recs(sample_loader(test_loader), inds)
+
+## =====
+
 begin
     Ls = []
-    for epoch in 1:500
-        if epoch % 40 == 0
+    for epoch in 1:40
+        if epoch % 50 == 0
             opt.eta = 0.5 * opt.eta
             log_value(lg, "learning_rate", opt.eta)
         end

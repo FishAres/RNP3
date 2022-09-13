@@ -70,6 +70,70 @@ function get_fpolicy_models(θs, Ha_bounds; args=args)
     return (Enc_za_a, f_policy, Dec_z_a), a0
 end
 
+function full_sequence2(models::Tuple, z0, a0, x; args=args, scale_offset=args[:scale_offset])
+    f_state, f_policy, Enc_za_z, Enc_za_a, Dec_z_x̂, Dec_z_a = models
+    z1, a1, x̂, patch_t = forward_pass(z0, a0, models, x; scale_offset=scale_offset)
+    out_small = full_sequence(z1, patch_t)
+    out = sample_patch(out_small, a1, sampling_grid)
+    for t = 2:args[:seqlen]
+        z1, a1, x̂, patch_t = forward_pass(z1, a1, models, x; scale_offset=scale_offset)
+        out_small = full_sequence(z1, patch_t)
+        out += sample_patch(out_small, a1, sampling_grid)
+    end
+    return out
+end
+
+function full_sequence2(z::AbstractArray, x; args=args, scale_offset=args[:scale_offset])
+    θsz = Hx(z)
+    θsa = Ha(z)
+    models, z0, a0 = get_models(θsz, θsa; args=args)
+    return full_sequence2(models, z0, a0, x; args=args, scale_offset=scale_offset)
+end
+
+function model_loss(x, r; args=args)
+    μ, logvar = Encoder(x)
+    z = sample_z(μ, logvar, r)
+    θsz = Hx(z)
+    θsa = Ha(z)
+    models, z0, a0 = get_models(θsz, θsa; args=args)
+    z1, a1, x̂, patch_t = forward_pass(z0, a0, models, x; scale_offset=args[:scale_offset])
+    out_small = full_sequence2(z1, patch_t)
+    out = sample_patch(out_small, a1, sampling_grid)
+    Lpatch = Flux.mse(flatten(out_small), flatten(patch_t); agg=sum)
+    for t = 2:args[:seqlen]
+        z1, a1, x̂, patch_t = forward_pass(z1, a1, models, x; scale_offset=args[:scale_offset])
+        out_small = full_sequence2(z1, patch_t)
+        out += sample_patch(out_small, a1, sampling_grid)
+        Lpatch += Flux.mse(flatten(out_small), flatten(patch_t); agg=sum)
+    end
+    klqp = kl_loss(μ, logvar)
+    rec_loss = Flux.mse(flatten(out), flatten(x); agg=sum)
+    return rec_loss + args[:λpatch] * Lpatch, klqp
+end
+
+"output sequence: full recs, local recs, xys (a1), patches_t"
+function get_loop(x; args=args)
+    outputs = patches, recs, as, patches_t = [], [], [], [], []
+    r = rand(args[:D], args[:π], args[:bsz]) |> gpu
+    μ, logvar = Encoder(x)
+    z = sample_z(μ, logvar, r)
+    θsz = Hx(z)
+    θsa = Ha(z)
+    models, z0, a0 = get_models(θsz, θsa; args=args)
+    z1, a1, x̂, patch_t = forward_pass(z0, a0, models, x; scale_offset=args[:scale_offset])
+    out_small = full_sequence2(z1, patch_t)
+    out = sample_patch(out_small, a1, sampling_grid)
+    push_to_arrays!((out, out_small, a1, patch_t), outputs)
+    for t = 2:args[:seqlen]
+        z1, a1, x̂, patch_t = forward_pass(z1, a1, models, x; scale_offset=args[:scale_offset])
+        out_small = full_sequence2(z1, patch_t)
+        out += sample_patch(out_small, a1, sampling_grid)
+        push_to_arrays!((out, out_small, a1, patch_t), outputs)
+    end
+    return outputs
+end
+
+
 ## ====
 
 # todo don't bind RNN size to args[:π]
@@ -149,14 +213,14 @@ p = plot_recs(sample_loader(test_loader), inds)
 
 ## =====
 
-save_folder = "gen_2lvl"
+save_folder = "gen_3lvl"
 alias = "double_H_mnist_generative_v0"
 save_dir = get_save_dir(save_folder, alias)
 
 ## =====
 # todo - separate sensing network?
 args[:seqlen] = 4
-args[:scale_offset] = 2.0f0
+args[:scale_offset] = 2.2f0
 
 # args[:λpatch] = Float32(1 / 2 * args[:seqlen])
 args[:λpatch] = 0.0f0
@@ -168,7 +232,7 @@ args[:α] = 1.0f0
 args[:β] = 0.5f0
 
 
-args[:η] = 4e-5
+args[:η] = 1e-4
 opt = ADAM(args[:η])
 lg = new_logger(joinpath(save_folder, alias), args)
 log_value(lg, "learning_rate", opt.eta)
@@ -176,7 +240,7 @@ log_value(lg, "learning_rate", opt.eta)
 begin
     Ls = []
     for epoch in 1:200
-        if epoch % 40 == 0
+        if epoch % 50 == 0
             opt.eta = 0.5 * opt.eta
             log_value(lg, "learning_rate", opt.eta)
         end
@@ -199,69 +263,3 @@ end
 
 ## ======
 
-function full_sequence2(models::Tuple, z0, a0, x; args=args, scale_offset=args[:scale_offset])
-    f_state, f_policy, Enc_za_z, Enc_za_a, Dec_z_x̂, Dec_z_a = models
-    z1, a1, x̂, patch_t = forward_pass(z0, a0, models, x; scale_offset=scale_offset)
-    out_small = full_sequence(z1, patch_t)
-    out = sample_patch(out_small, a1, sampling_grid)
-    for t = 2:args[:seqlen]
-        z1, a1, x̂, patch_t = forward_pass(z1, a1, models, x; scale_offset=scale_offset)
-        out_small = full_sequence(z1, patch_t)
-        out += sample_patch(out_small, a1, sampling_grid)
-    end
-    return out
-end
-
-function full_sequence2(z::AbstractArray, x; args=args, scale_offset=args[:scale_offset])
-    θsz = Hx(z)
-    θsa = Ha(z)
-    models, z0, a0 = get_models(θsz, θsa; args=args)
-    return full_sequence2(models, z0, a0, x; args=args, scale_offset=scale_offset)
-end
-
-
-
-"output sequence: full recs, local recs, xys (a1), patches_t"
-function get_loop2(x; args=args)
-    outputs = patches, recs, as, patches_t = [], [], [], [], []
-    r = rand(args[:D], args[:π], args[:bsz]) |> gpu
-    μ, logvar = Encoder(x)
-    z = sample_z(μ, logvar, r)
-    θsz = Hx(z)
-    θsa = Ha(z)
-    models, z0, a0 = get_models(θsz, θsa; args=args)
-    z1, a1, x̂, patch_t = forward_pass(z0, a0, models, x; scale_offset=args[:scale_offset])
-    out_small = full_sequence2(z1, patch_t)
-    out = sample_patch(out_small, a1, sampling_grid)
-    push_to_arrays!((out, out_small, a1, patch_t), outputs)
-    for t = 2:args[:seqlen]
-        z1, a1, x̂, patch_t = forward_pass(z1, a1, models, x; scale_offset=args[:scale_offset])
-        out_small = full_sequence2(z1, patch_t)
-        out += sample_patch(out_small, a1, sampling_grid)
-        push_to_arrays!((out, out_small, a1, patch_t), outputs)
-    end
-    return outputs
-end
-
-function plot_recs(x, inds; plot_seq=true, args=args, loop_fun=get_loop)
-    full_recs, patches, xys, patches_t = loop_fun(x)
-    p = plot_seq ? let
-        patches_ = map(x -> reshape(x, 28, 28, 1, size(x)[end]), patches)
-        [plot_rec(full_recs[end], x, patches_, ind) for ind in inds]
-    end : [plot_rec(full_recs[end], x, ind) for ind in inds]
-
-    return plot(p...; layout=(length(inds), 1), size=(600, 800))
-end
-
-## =====
-
-
-inds = sample(1:args[:bsz], 6, replace=false)
-x_ = sample_loader(test_loader)
-
-begin
-    args[:scale_offset] = 2f0
-    p1 = plot_recs(x_, inds; loop_fun=get_loop)
-    p2 = plot_recs(x_, inds; loop_fun=get_loop2)
-    plot(p1, p2, size=(1200, 1200))
-end
