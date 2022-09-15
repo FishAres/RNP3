@@ -8,41 +8,40 @@ using IterTools: partition, iterated
 using Flux: batch, unsqueeze, flatten
 using Flux.Data: DataLoader
 using Distributions
+using Images
 using StatsBase: sample
 using Random: shuffle
-
+using ParameterSchedulers
 
 include(srcdir("gen_vae_utils.jl"))
 
 CUDA.allowscalar(false)
-## ====
+
+## ======
+
 args = Dict(
-    :bsz => 64, :img_size => (32, 32), :π => 32, :img_channels => 3,
-    :esz => 32, :add_offset => true, :fa_out => identity, :f_z => identity,
-    :asz => 6, :glimpse_len => 4, :seqlen => 5, :λ => 1.0f-3, :λpatch => Float32(1 / 4),
+    :bsz => 64, :img_size => (50, 50), :img_channels => 3, :π => 32,
+    :esz => 32, :add_offset => true, :fa_out => identity, :f_z => elu,
+    :asz => 6, :glimpse_len => 4, :seqlen => 5, :λ => 1.0f-3, :δL => Float32(1 / 4),
     :scale_offset => 2.8f0, :scale_offset_sense => 3.2f0,
     :λf => 0.167f0, :D => Normal(0.0f0, 1.0f0),
 )
 args[:imszprod] = prod(args[:img_size])
-
 ## =====
 
 device!(1)
 
 dev = gpu
+## =====
 
-##=====
-train_digits, train_labels = CIFAR10(split=:train)[:]
-test_digits, test_labels = CIFAR10(split=:test)[:]
+full_data = load(datadir("exp_pro", "eth80_50x50.jld2"))["full_data"]
+full_data_shuffled = cat(shuffle(collect(eachslice(full_data, dims=4)))..., dims=4)
 
-train_labels = Float32.(Flux.onehotbatch(train_labels, 0:9))
-test_labels = Float32.(Flux.onehotbatch(test_labels, 0:9))
+data_train = full_data_shuffled[:, :, :, 1:3100]
+data_test = full_data_shuffled[:, :, :, 3101:end]
 
-train_loader = DataLoader((train_digits |> dev), batchsize=args[:bsz], shuffle=true, partial=false)
-test_loader = DataLoader((test_digits |> dev), batchsize=args[:bsz], shuffle=true, partial=false)
-
-x = first(train_loader)
-
+train_loader = DataLoader(data_train |> dev, batchsize=args[:bsz], shuffle=true, partial=false)
+test_loader = DataLoader(data_test |> dev, batchsize=args[:bsz], shuffle=true, partial=false)
 
 ## =====
 dev = has_cuda() ? gpu : cpu
@@ -54,7 +53,7 @@ const zeros_vec = zeros(1, 1, args[:bsz]) |> dev
 diag_vec = [[1.0f0 0.0f0; 0.0f0 1.0f0] for _ in 1:args[:bsz]]
 const diag_mat = cat(diag_vec..., dims=3) |> dev
 const diag_off = cat(1.0f-6 .* diag_vec..., dims=3) |> dev
-## =====
+## ===== functions
 
 function get_fstate_models(θs, Hx_bounds; args=args, fz=args[:f_z])
     inds = Zygote.ignore() do
@@ -124,16 +123,18 @@ function plot_recs(x, inds; plot_seq=true, args=args)
     return plot(p...; layout=(length(inds), 1), size=(600, 800))
 end
 
-
-## ====
+## ====== model
 
 # todo don't bind RNN size to args[:π]
-
 args[:π] = 128
+args[:depth_Hx] = 6
+args[:D] = Normal(0.0f0, 1.0f0)
 
 l_enc_za_z = (args[:π] + args[:asz]) * args[:π] # encoder (z_t, a_t) -> z_t+1
 l_fx = get_rnn_θ_sizes(args[:π], args[:π])
+l_err_rnn = get_rnn_θ_sizes(args[:π], args[:π]) # also same size lol
 l_dec_x = args[:imszprod] * args[:π] # decoder z -> x̂, no bias
+l_enc_e_z = ((args[:imszprod] * args[:img_channels]) + 1) * args[:π]
 
 Hx_bounds = [l_enc_za_z; l_fx; l_dec_x; l_dec_x; l_dec_x]
 
@@ -148,16 +149,7 @@ Hx = Chain(
     LayerNorm(args[:π],),
     Dense(args[:π], 64),
     LayerNorm(64, elu),
-    Dense(64, 64),
-    LayerNorm(64, elu),
-    Dense(64, 64),
-    LayerNorm(64, elu),
-    Dense(64, 64),
-    LayerNorm(64, elu),
-    Dense(64, 64),
-    LayerNorm(64, elu),
-    Dense(64, 64),
-    LayerNorm(64, elu),
+    [Chain(Dense(64, 64), LayerNorm(64, elu)) for _ in 1:args[:depth_Hx]]...,
     Dense(64, sum(Hx_bounds) + args[:π], bias=false),
 ) |> gpu
 
@@ -178,6 +170,7 @@ Encoder = let
         BatchNorm(32, relu),
         Conv((5, 5), 32 => 32, pad=(1, 1)),
         BatchNorm(32, relu),
+        BasicBlock(32 => 32, +),
         BasicBlock(32 => 32, +),
         BasicBlock(32 => 32, +),
         BasicBlock(32 => 32, +),
@@ -206,44 +199,46 @@ Encoder = let
 end |> gpu
 ps = Flux.params(Hx, Ha, Encoder)
 
+
 ## ======
-
-save_folder = "gen_2lvl"
-alias = "double_H_cifar_generative_v0"
-save_dir = get_save_dir(save_folder, alias)
-
-## =====
-# todo - separate sensing network?
-args[:seqlen] = 4
-args[:scale_offset] = 1.5f0
-
-args[:λpatch] = Float32(1 / 8)
-args[:λpatch] = 0.0f0
-args[:λf] = 1.0f0
-args[:λ] = 0.001f0
-args[:D] = Normal(0.0f0, 1.0f0)
-
-args[:α] = 1.0f0
-args[:β] = 0.5f0
-
-
-args[:η] = 4e-5
-opt = ADAM(args[:η])
-lg = new_logger(joinpath(save_folder, alias), args)
-
-## ====
 
 inds = sample(1:args[:bsz], 6, replace=false)
 p = plot_recs(sample_loader(test_loader), inds)
 
 ## =====
 
+save_folder = "gen_2lvl"
+alias = "2lvl_double_H_eth80_50x50_vae_v0"
+save_dir = get_save_dir(save_folder, alias)
+
+## =====
+# todo - separate sensing network?
+args[:seqlen] = 4
+args[:scale_offset] = 1.8f0
+
+args[:λpatch] = 0.0f0
+args[:λ] = 0.001f0
+
+args[:α] = 1.0f0
+args[:β] = 0.2f0
+
+args[:η] = 4e-5
+opt = ADAM(args[:η])
+lg = new_logger(joinpath(save_folder, alias), args)
+# todo try sinusoidal lr schedule
+
+# using ParameterSchedulers
+# using ParameterSchedulers: Stateful
+
+# s = Stateful(SinExp(args[:η], 4e-7, 20, 0.99))
+
+## ====
 begin
-    Ls = []
-    for epoch in 1:40
-        if epoch % 50 == 0
-            opt.eta = 0.5 * opt.eta
-            log_value(lg, "learning_rate", opt.eta)
+    # Ls = []
+    for epoch in 1:1200
+        if epoch % 100 == 0
+            opt.eta = 0.8 * opt.eta
+            log_value(lg, "eta", opt.eta)
         end
         ls = train_model(opt, ps, train_loader; epoch=epoch, logger=lg)
         inds = sample(1:args[:bsz], 6, replace=false)
@@ -251,12 +246,25 @@ begin
         display(p)
         log_image(lg, "recs_$(epoch)", p)
         L = test_model(test_loader)
+
         log_value(lg, "test_loss", L)
         @info "Test loss: $L"
-        push!(Ls, ls)
         if epoch % 50 == 0
             save_model((Hx, Ha, Encoder), joinpath(save_folder, alias, savename(args) * "_$(epoch)eps"))
         end
     end
 end
 
+## ====
+
+# rs = [rand(args[:D], args[:π], args[:bsz]) for _ in 1:args[:seqlen]] |> gpu
+
+
+# full_recs, patches, errs, zs, as, patches_t = get_loop(z0, x, rs)
+
+
+
+# aa = z0 |> cpu
+# heatmap(aa)
+
+# histogram(aa', legend=false, alpha=0.2, bins=-5:0.5:5)

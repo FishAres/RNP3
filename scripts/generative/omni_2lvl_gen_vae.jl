@@ -239,8 +239,10 @@ begin
         ls = train_model(opt, ps, train_loader; epoch=epoch, logger=lg)
         inds = sample(1:args[:bsz], 6, replace=false)
         p = plot_recs(sample_loader(test_loader), inds)
+        p2 = plot_recs(sample_loader(train_loader), inds)
         display(p)
         log_image(lg, "recs_$(epoch)", p)
+
         L = test_model(test_loader)
         log_value(lg, "test_loss", L)
         @info "Test loss: $L"

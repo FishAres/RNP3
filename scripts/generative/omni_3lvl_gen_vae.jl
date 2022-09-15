@@ -27,20 +27,44 @@ args[:imzprod] = prod(args[:img_size])
 
 ## =====
 
-device!(1)
+device!(2)
 
 dev = gpu
 
 ##=====
-train_digits, train_labels = MNIST(split=:train)[:]
-test_digits, test_labels = MNIST(split=:test)[:]
 
-train_labels = Float32.(Flux.onehotbatch(train_labels, 0:9))
-test_labels = Float32.(Flux.onehotbatch(test_labels, 0:9))
+train_digits, train_labels = Omniglot(split=:train)[:]
+test_digits, test_labels = Omniglot(split=:test)[:]
 
-train_loader = DataLoader((train_digits |> dev), batchsize=args[:bsz], shuffle=true, partial=false)
-test_loader = DataLoader((test_digits |> dev), batchsize=args[:bsz], shuffle=true, partial=false)
+train_digits = 1.0f0 .- imresize(train_digits, (28, 28))
+test_digits = 1.0f0 .- imresize(test_digits, (28, 28))
 
+# binarize
+
+function binarize(x; thresh=0.5f0)
+    x[x.<=thresh] .= 0.0f0
+    x[x.>thresh] .= 1.0f0
+    return x
+end
+
+## ===== filter
+train_chars = zeros(Float32, size(train_digits))
+test_chars = zeros(Float32, size(test_digits))
+
+Threads.@threads for i in 1:size(train_digits, 3)
+    train_chars[:, :, i] = imfilter(train_digits[:, :, i], Kernel.gaussian(0.5f0))
+end
+
+Threads.@threads for i in 1:size(test_digits, 3)
+    test_chars[:, :, i] = imfilter(test_digits[:, :, i], Kernel.gaussian(0.5f0))
+end
+## =====
+
+# train_labels = Float32.(Flux.onehotbatch(train_labels, 0:9))
+# test_labels = Float32.(Flux.onehotbatch(test_labels, 0:9))
+
+train_loader = DataLoader(train_chars |> dev, batchsize=args[:bsz], shuffle=true, partial=false)
+test_loader = DataLoader(test_chars |> dev, batchsize=args[:bsz], shuffle=true, partial=false)
 
 ## =====
 dev = has_cuda() ? gpu : cpu
@@ -138,7 +162,7 @@ end
 
 # todo don't bind RNN size to args[:π]
 
-args[:π] = 32
+args[:π] = 100
 
 l_enc_za_z = (args[:π] + args[:asz]) * args[:π] # encoder (z_t, a_t) -> z_t+1
 l_fx = get_rnn_θ_sizes(args[:π], args[:π])
@@ -208,14 +232,6 @@ ps = Flux.params(Hx, Ha, Encoder)
 
 ## ======
 
-modelpath = "saved_models/gen_3lvl/double_H_mnist_generative_v0/add_offset=true_asz=6_bsz=64_esz=32_glimpse_len=4_img_channels=1_imzprod=784_scale_offset=2.2_scale_offset_sense=3.2_seqlen=4_α=1.0_β=0.5_η=0.0001_λ=0.001_λf=1.0_λpatch=0.0_π=32_17eps.bson"
-
-model = load(modelpath)[:model] |> gpu
-ps = Flux.params(model)
-Hx, Ha, Encoder = model
-
-## ======
-
 inds = sample(1:args[:bsz], 6, replace=false)
 p = plot_recs(sample_loader(test_loader), inds)
 
@@ -240,14 +256,14 @@ args[:α] = 1.0f0
 args[:β] = 0.5f0
 
 
-args[:η] = 1e-4
+args[:η] = 4e-5
 opt = ADAM(args[:η])
 lg = new_logger(joinpath(save_folder, alias), args)
 log_value(lg, "learning_rate", opt.eta)
 ## ====
 begin
     Ls = []
-    for epoch in 17:200
+    for epoch in 1:200
         if epoch % 50 == 0
             opt.eta = 0.5 * opt.eta
             log_value(lg, "learning_rate", opt.eta)
@@ -262,7 +278,7 @@ begin
         log_value(lg, "test_loss", L)
         @info "Test loss: $L"
         push!(Ls, ls)
-        if epoch % 50 == 0
+        if epoch % 25 == 0
             save_model((Hx, Ha, Encoder), joinpath(save_folder, alias, savename(args) * "_$(epoch)eps"))
         end
     end

@@ -123,6 +123,7 @@ Encoder = let
         BasicBlock(32 => 32, +),
         BasicBlock(32 => 32, +),
         BasicBlock(32 => 32, +),
+        BasicBlock(32 => 32, +),
         flatten,
     )
     outsz = Flux.outputsize(enc1, (28, 28, 1, args[:bsz]))

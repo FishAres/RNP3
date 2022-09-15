@@ -27,7 +27,7 @@ args[:imzprod] = prod(args[:img_size])
 
 ## =====
 
-device!(1)
+device!(0)
 
 dev = gpu
 
@@ -38,9 +38,44 @@ test_digits, test_labels = MNIST(split=:test)[:]
 train_labels = Float32.(Flux.onehotbatch(train_labels, 0:9))
 test_labels = Float32.(Flux.onehotbatch(test_labels, 0:9))
 
-train_loader = DataLoader((train_digits |> dev), batchsize=args[:bsz], shuffle=true, partial=false)
-test_loader = DataLoader((test_digits |> dev), batchsize=args[:bsz], shuffle=true, partial=false)
+## =====
 
+function mnist_quadrants(xs; args=args)
+    tmp = collect(partition(eachslice(xs, dims=3), 4))
+    a = map(x -> vcat(x[1:2]...), tmp)
+    b = map(x -> vcat(x[3:4]...), tmp)
+    c = map(x -> hcat(x...), zip(a, b))
+    resized_vec = map(x -> imresize(x, args[:img_size]), c)
+    # return fast_img_concat(resized_vec)
+end
+
+function fast_img_concat(xs; args=args)
+    cat_ims = zeros(Float32, args[:img_size]..., length(xs))
+    Threads.@threads for i in 1:length(xs)
+        cat_ims[:, :, i] = xs[i]
+    end
+    return cat_ims
+end
+
+function gen_mnist_quad_data(args)
+    train_digits, train_labels = MNIST(split=:train)[:]
+    test_digits, test_labels = MNIST(split=:test)[:]
+    train_ims = mnist_quadrants(train_digits)
+    test_ims = mnist_quadrants(test_digits)
+    train_digit_vec = collect(eachslice(train_digits, dims=3))
+    test_digit_vec = collect(eachslice(test_digits, dims=3))
+
+    train_data = fast_img_concat(shuffle([train_ims; train_digit_vec]))
+    test_data = fast_img_concat(shuffle([test_ims; test_digit_vec]))
+
+    return train_data, test_data
+
+end
+
+train_data, test_data = gen_mnist_quad_data(args)
+
+train_loader = DataLoader((train_data |> dev), batchsize=args[:bsz], shuffle=true, partial=false)
+test_loader = DataLoader((test_data |> dev), batchsize=args[:bsz], shuffle=true, partial=false)
 
 ## =====
 dev = has_cuda() ? gpu : cpu
@@ -206,15 +241,7 @@ Encoder = let
 end |> gpu
 ps = Flux.params(Hx, Ha, Encoder)
 
-## ======
-
-modelpath = "saved_models/gen_3lvl/double_H_mnist_generative_v0/add_offset=true_asz=6_bsz=64_esz=32_glimpse_len=4_img_channels=1_imzprod=784_scale_offset=2.2_scale_offset_sense=3.2_seqlen=4_α=1.0_β=0.5_η=0.0001_λ=0.001_λf=1.0_λpatch=0.0_π=32_17eps.bson"
-
-model = load(modelpath)[:model] |> gpu
-ps = Flux.params(model)
-Hx, Ha, Encoder = model
-
-## ======
+## =====
 
 inds = sample(1:args[:bsz], 6, replace=false)
 p = plot_recs(sample_loader(test_loader), inds)
@@ -222,7 +249,7 @@ p = plot_recs(sample_loader(test_loader), inds)
 ## =====
 
 save_folder = "gen_3lvl"
-alias = "double_H_mnist_generative_v0"
+alias = "double_H_mnist_quad_generative_v0"
 save_dir = get_save_dir(save_folder, alias)
 
 ## =====
@@ -247,9 +274,9 @@ log_value(lg, "learning_rate", opt.eta)
 ## ====
 begin
     Ls = []
-    for epoch in 17:200
+    for epoch in 1:200
         if epoch % 50 == 0
-            opt.eta = 0.5 * opt.eta
+            opt.eta = 0.67 * opt.eta
             log_value(lg, "learning_rate", opt.eta)
         end
 
