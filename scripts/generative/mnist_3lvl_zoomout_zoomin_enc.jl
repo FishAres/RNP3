@@ -81,10 +81,11 @@ function gen_mnist_quad_data(args; n_repeats=3)
     return train_data, test_data
 end
 
-train_data, test_data = gen_mnist_quad_data(args)
-
-train_loader = DataLoader((train_data |> dev), batchsize=args[:bsz], shuffle=true, partial=false)
-test_loader = DataLoader((test_data |> dev), batchsize=args[:bsz], shuffle=true, partial=false)
+# train_data, test_data = gen_mnist_quad_data(args)
+train_digits, train_labels = MNIST(split=:train)[:]
+test_digits, test_labels = MNIST(split=:test)[:]
+train_loader = DataLoader((train_digits |> dev), batchsize=args[:bsz], shuffle=true, partial=false)
+test_loader = DataLoader((test_digits |> dev), batchsize=args[:bsz], shuffle=true, partial=false)
 
 
 ## =====
@@ -115,68 +116,68 @@ function get_fpolicy_models(θs, Ha_bounds; args=args)
     return (Enc_za_a, f_policy, Dec_z_a), a0
 end
 
-function full_sequence2(models::Tuple, z0, a0, x; args=args, scale_offset=args[:scale_offset])
-    f_state, f_policy, Enc_za_z, Enc_za_a, Dec_z_x̂, Dec_z_a = models
-    z1, a1, x̂, patch_t = forward_pass(z0, a0, models, x; scale_offset=scale_offset)
-    out_small = full_sequence(z1, patch_t)
-    out = sample_patch(out_small, a1, sampling_grid)
-    for t = 2:args[:seqlen]
-        z1, a1, x̂, patch_t = forward_pass(z1, a1, models, x; scale_offset=scale_offset)
-        out_small = full_sequence(z1, patch_t)
-        out += sample_patch(out_small, a1, sampling_grid)
-    end
-    return out
-end
+# function full_sequence2(models::Tuple, z0, a0, x; args=args, scale_offset=args[:scale_offset])
+#     f_state, f_policy, Enc_za_z, Enc_za_a, Dec_z_x̂, Dec_z_a = models
+#     z1, a1, x̂, patch_t = forward_pass(z0, a0, models, x; scale_offset=scale_offset)
+#     out_small = full_sequence(z1, patch_t)
+#     out = sample_patch(out_small, a1, sampling_grid)
+#     for t = 2:args[:seqlen]
+#         z1, a1, x̂, patch_t = forward_pass(z1, a1, models, x; scale_offset=scale_offset)
+#         out_small = full_sequence(z1, patch_t)
+#         out += sample_patch(out_small, a1, sampling_grid)
+#     end
+#     return out
+# end
 
-function full_sequence2(z::AbstractArray, x; args=args, scale_offset=args[:scale_offset])
-    θsz = Hx(z)
-    θsa = Ha(z)
-    models, z0, a0 = get_models(θsz, θsa; args=args)
-    return full_sequence2(models, z0, a0, x; args=args, scale_offset=scale_offset)
-end
+# function full_sequence2(z::AbstractArray, x; args=args, scale_offset=args[:scale_offset])
+#     θsz = Hx(z)
+#     θsa = Ha(z)
+#     models, z0, a0 = get_models(θsz, θsa; args=args)
+#     return full_sequence2(models, z0, a0, x; args=args, scale_offset=scale_offset)
+# end
 
-function model_loss(x, r; args=args)
-    μ, logvar = Encoder(x)
-    z = sample_z(μ, logvar, r)
-    θsz = Hx(z)
-    θsa = Ha(z)
-    models, z0, a0 = get_models(θsz, θsa; args=args)
-    z1, a1, x̂, patch_t = forward_pass(z0, a0, models, x; scale_offset=args[:scale_offset])
-    out_small = full_sequence2(z1, patch_t)
-    out = sample_patch(out_small, a1, sampling_grid)
-    Lpatch = Flux.mse(flatten(out_small), flatten(patch_t); agg=sum)
-    for t = 2:args[:seqlen]
-        z1, a1, x̂, patch_t = forward_pass(z1, a1, models, x; scale_offset=args[:scale_offset])
-        out_small = full_sequence2(z1, patch_t)
-        out += sample_patch(out_small, a1, sampling_grid)
-        Lpatch += Flux.mse(flatten(out_small), flatten(patch_t); agg=sum)
-    end
-    klqp = kl_loss(μ, logvar)
-    rec_loss = Flux.mse(flatten(out), flatten(x); agg=sum)
-    return rec_loss + args[:λpatch] * Lpatch, klqp
-end
+# function model_loss(x, r; args=args)
+#     μ, logvar = Encoder(x)
+#     z = sample_z(μ, logvar, r)
+#     θsz = Hx(z)
+#     θsa = Ha(z)
+#     models, z0, a0 = get_models(θsz, θsa; args=args)
+#     z1, a1, x̂, patch_t = forward_pass(z0, a0, models, x; scale_offset=args[:scale_offset])
+#     out_small = full_sequence2(z1, patch_t)
+#     out = sample_patch(out_small, a1, sampling_grid)
+#     Lpatch = Flux.mse(flatten(out_small), flatten(patch_t); agg=sum)
+#     for t = 2:args[:seqlen]
+#         z1, a1, x̂, patch_t = forward_pass(z1, a1, models, x; scale_offset=args[:scale_offset])
+#         out_small = full_sequence2(z1, patch_t)
+#         out += sample_patch(out_small, a1, sampling_grid)
+#         Lpatch += Flux.mse(flatten(out_small), flatten(patch_t); agg=sum)
+#     end
+#     klqp = kl_loss(μ, logvar)
+#     rec_loss = Flux.mse(flatten(out), flatten(x); agg=sum)
+#     return rec_loss + args[:λpatch] * Lpatch, klqp
+# end
 
-"output sequence: full recs, local recs, xys (a1), patches_t"
-function get_loop(x; args=args)
-    outputs = patches, recs, as, patches_t = [], [], [], [], []
-    r = rand(args[:D], args[:π], args[:bsz]) |> gpu
-    μ, logvar = Encoder(x)
-    z = sample_z(μ, logvar, r)
-    θsz = Hx(z)
-    θsa = Ha(z)
-    models, z0, a0 = get_models(θsz, θsa; args=args)
-    z1, a1, x̂, patch_t = forward_pass(z0, a0, models, x; scale_offset=args[:scale_offset])
-    out_small = full_sequence2(z1, patch_t)
-    out = sample_patch(out_small, a1, sampling_grid)
-    push_to_arrays!((out, out_small, a1, patch_t), outputs)
-    for t = 2:args[:seqlen]
-        z1, a1, x̂, patch_t = forward_pass(z1, a1, models, x; scale_offset=args[:scale_offset])
-        out_small = full_sequence2(z1, patch_t)
-        out += sample_patch(out_small, a1, sampling_grid)
-        push_to_arrays!((out, out_small, a1, patch_t), outputs)
-    end
-    return outputs
-end
+# "output sequence: full recs, local recs, xys (a1), patches_t"
+# function get_loop(x; args=args)
+#     outputs = patches, recs, as, patches_t = [], [], [], [], []
+#     r = rand(args[:D], args[:π], args[:bsz]) |> gpu
+#     μ, logvar = Encoder(x)
+#     z = sample_z(μ, logvar, r)
+#     θsz = Hx(z)
+#     θsa = Ha(z)
+#     models, z0, a0 = get_models(θsz, θsa; args=args)
+#     z1, a1, x̂, patch_t = forward_pass(z0, a0, models, x; scale_offset=args[:scale_offset])
+#     out_small = full_sequence2(z1, patch_t)
+#     out = sample_patch(out_small, a1, sampling_grid)
+#     push_to_arrays!((out, out_small, a1, patch_t), outputs)
+#     for t = 2:args[:seqlen]
+#         z1, a1, x̂, patch_t = forward_pass(z1, a1, models, x; scale_offset=args[:scale_offset])
+#         out_small = full_sequence2(z1, patch_t)
+#         out += sample_patch(out_small, a1, sampling_grid)
+#         push_to_arrays!((out, out_small, a1, patch_t), outputs)
+#     end
+#     return outputs
+# end
 
 
 ## ====
@@ -199,30 +200,30 @@ l_dec_a = args[:asz] * args[:π] + args[:asz] # decoder z -> a, with bias
 
 Ha_bounds = [l_enc_za_a; l_fa; l_dec_a]
 
-Hx = Chain(
-    LayerNorm(args[:π],),
-    Dense(args[:π], 64),
-    LayerNorm(64, elu),
-    Dense(64, 64),
-    LayerNorm(64, elu),
-    Dense(64, 64),
-    LayerNorm(64, elu),
-    Dense(64, 64),
-    LayerNorm(64, elu),
-    Dense(64, sum(Hx_bounds) + args[:π], bias=false),
-) |> gpu
+# Hx = Chain(
+#     LayerNorm(args[:π],),
+#     Dense(args[:π], 64),
+#     LayerNorm(64, elu),
+#     Dense(64, 64),
+#     LayerNorm(64, elu),
+#     Dense(64, 64),
+#     LayerNorm(64, elu),
+#     Dense(64, 64),
+#     LayerNorm(64, elu),
+#     Dense(64, sum(Hx_bounds) + args[:π], bias=false),
+# ) |> gpu
 
-Ha = Chain(
-    LayerNorm(args[:π],),
-    Dense(args[:π], 64),
-    LayerNorm(64, elu),
-    Dense(64, 64),
-    LayerNorm(64, elu),
-    Dense(64, sum(Ha_bounds) + args[:asz], bias=false),
-) |> gpu
+# Ha = Chain(
+#     LayerNorm(args[:π],),
+#     Dense(args[:π], 64),
+#     LayerNorm(64, elu),
+#     Dense(64, 64),
+#     LayerNorm(64, elu),
+#     Dense(64, sum(Ha_bounds) + args[:asz], bias=false),
+# ) |> gpu
 
-
-Encoder = let
+# * Digit encoder
+Encoder_digit = let
     enc1 = Chain(
         x -> reshape(x, 28, 28, 1, :),
         Conv((5, 5), 1 => 32),
@@ -251,23 +252,30 @@ Encoder = let
         )
     )
 end |> gpu
-ps = Flux.params(Hx, Ha, Encoder)
+
+## ======
+
+modelpath = "saved_models/gen_3lvl/double_H_mnist_full_quad_generative_v0/add_offset=true_asz=6_bsz=64_esz=32_glimpse_len=4_img_channels=1_imzprod=784_scale_offset=2.0_scale_offset_sense=3.2_seqlen=4_α=2.0_β=0.01_η=4e-5_λ=0.001_λf=1.0_λpatch=0.0_π=32_200eps.bson"
+
+Hx, Ha, Encoder = load(modelpath)[:model] |> gpu
+
 
 ## =====
-
+x = sample_loader(test_loader)
 inds = sample(1:args[:bsz], 6, replace=false)
+
 p = plot_recs(sample_loader(test_loader), inds)
 
 ## =====
 
 save_folder = "gen_3lvl"
-alias = "double_H_mnist_full_quad_generative_v0"
+alias = "double_H_mnist_full_quad_generative_digit_encoder_v0"
 save_dir = get_save_dir(save_folder, alias)
 
 ## =====
 # todo - separate sensing network?
 args[:seqlen] = 4
-args[:scale_offset] = 2.0f0
+args[:scale_offset] = 1.6f0
 
 # args[:λpatch] = Float32(1 / 2 * args[:seqlen])
 args[:λpatch] = 0.0f0
@@ -278,15 +286,19 @@ args[:D] = Normal(0.0f0, 1.0f0)
 args[:α] = 2.0f0
 args[:β] = 0.01f0
 
-
+## =====
 args[:η] = 4e-5
 opt = ADAM(args[:η])
 lg = new_logger(joinpath(save_folder, alias), args)
 log_value(lg, "learning_rate", opt.eta)
+
+## ==== New Encoder
+Encoder = Encoder_digit
+ps = Flux.params(Encoder)
 ## ====
 begin
     Ls = []
-    for epoch in 1:200
+    for epoch in 1:100
         if epoch % 50 == 0
             opt.eta = 0.67 * opt.eta
             log_value(lg, "learning_rate", opt.eta)
