@@ -76,9 +76,9 @@ function get_fstate_models(θs, Hx_bounds; args=args, fz=args[:f_z])
     end
     Θ = [θs[inds[i]+1:inds[i+1], :] for i in 1:length(inds)-1]
 
-    Enc_za_z = Chain(HyDense(args[:π] + args[:asz], 2args[:π], Θ[1], elu), flatten)
+    Enc_za_z = Chain(HyDense(args[:π] + args[:asz], args[:π], Θ[1], elu), flatten)
 
-    f_state = ps_to_RN(get_rn_θs(Θ[2], args[:π], args[:π]); f_out=fz)
+    f_state = ps_to_RN(get_rn_θs(Θ[2], args[:π], 2 * args[:π]); f_out=identity)
 
     Dec_z_x̂ = Chain(HyDense(args[:π], 784, Θ[3], relu6), flatten)
 
@@ -92,12 +92,11 @@ function forward_pass(z1, a1, models, x; scale_offset=args[:scale_offset])
     f_state, f_policy, Enc_za_z, Enc_za_a, Dec_z_x̂, Dec_z_a = models
     za = vcat(z1, a1) # todo parallel layer?
     ez = Enc_za_z(za)
-    μz, σz = ez[1:args[:π], :], ez[args[:π]+1:end, :]
-    ez_rand = sample_z(μz, σz, randn(Float32, args[:π], args[:bsz]) |> gpu)
     ea = Enc_za_a(za)
-    z1 = f_state(ez_rand)
+    z1_mn_std = f_state(ez)
+    μz, σz = z1_mn_std[1:args[:π], :], z1_mn_std[args[:π]+1:end, :]
+    z1 = sample_z(μz, σz, randn(Float32, args[:π], args[:bsz]) |> gpu)
     a1 = Dec_z_a(f_policy(ea))
-
     x̂ = Dec_z_x̂(z1)
     patch_t = zoom_in2d(x, a1, sampling_grid; scale_offset=scale_offset) |> flatten
 
@@ -113,8 +112,8 @@ end
 args[:π] = 32
 
 # 2 * args[:π] -> μ, logvar in enc_za_z
-l_enc_za_z = (args[:π] + args[:asz]) * 2args[:π] # encoder (z_t, a_t) -> z_t+1
-l_fx = get_rnn_θ_sizes(args[:π], args[:π])
+l_enc_za_z = (args[:π] + args[:asz]) * args[:π] # encoder (z_t, a_t) -> z_t+1
+l_fx = get_rnn_θ_sizes(args[:π], 2args[:π])
 l_dec_x = 784 * args[:π] # decoder z -> x̂, no bias
 l_enc_e_z = (784 + 1) * args[:π]
 

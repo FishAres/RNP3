@@ -197,13 +197,14 @@ ps = Flux.params(Hx, Ha, Encoder)
 
 ## ======
 
+
 inds = sample(1:args[:bsz], 6, replace=false)
 p = plot_recs(sample_loader(test_loader), inds)
 
 ## =====
 
 save_folder = "gen_2lvl"
-alias = "2lvl_double_H_eth80_50x50_vae_v01"
+alias = "2lvl_double_H_eth80_50x50_vae_v0_finetune"
 save_dir = get_save_dir(save_folder, alias)
 
 ## =====
@@ -217,24 +218,15 @@ args[:λ] = 0.001f0
 args[:α] = 1.0f0
 args[:β] = 0.2f0
 
-args[:η] = 4e-5
+args[:η] = 5e-6
 opt = ADAM(args[:η])
 lg = new_logger(joinpath(save_folder, alias), args)
 # todo try sinusoidal lr schedule
 
-# using ParameterSchedulers
-# using ParameterSchedulers: Stateful
-
-# s = Stateful(SinExp(args[:η], 4e-7, 20, 0.99))
-
 ## ====
 begin
     # Ls = []
-    for epoch in 1:1200
-        if epoch % 100 == 0
-            opt.eta = 0.8 * opt.eta
-            log_value(lg, "eta", opt.eta)
-        end
+    for epoch in 1201:2000
         ls = train_model(opt, ps, train_loader; epoch=epoch, logger=lg)
         inds = sample(1:args[:bsz], 6, replace=false)
         p = plot_recs(sample_loader(test_loader), inds)
@@ -244,7 +236,7 @@ begin
 
         log_value(lg, "test_loss", L)
         @info "Test loss: $L"
-        if epoch % 50 == 0
+        if epoch % 250 == 0
             save_model((Hx, Ha, Encoder), joinpath(save_folder, alias, savename(args) * "_$(epoch)eps"))
         end
     end
