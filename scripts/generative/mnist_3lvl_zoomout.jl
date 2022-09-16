@@ -57,7 +57,7 @@ function fast_img_concat(xs; args=args)
     return cat_ims
 end
 
-function gen_mnist_quad_data(args)
+function gen_mnist_quad_data_mixed(args)
     train_digits, train_labels = MNIST(split=:train)[:]
     test_digits, test_labels = MNIST(split=:test)[:]
     train_ims = mnist_quadrants(train_digits)
@@ -70,6 +70,23 @@ function gen_mnist_quad_data(args)
 
     return train_data, test_data
 
+end
+
+function shuffle_concat_mnist(digits)
+    train_digit_vec = shuffle(collect(eachslice(digits, dims=3)))
+    fast_img_concat(train_digit_vec)
+end
+
+function gen_mnist_quad_data(args; n_repeats=2)
+    train_digits, train_labels = MNIST(split=:train)[:]
+    test_digits, test_labels = MNIST(split=:test)[:]
+    train_ims = [mnist_quadrants(shuffle_concat_mnist(train_digits)) for _ in 1:n_repeats]
+    test_ims = [mnist_quadrants(shuffle_concat_mnist(test_digits)) for _ in 1:n_repeats]
+
+    train_data = fast_img_concat(vcat(train_ims...))
+    test_data = fast_img_concat(vcat(test_ims...))
+
+    return train_data, test_data
 end
 
 train_data, test_data = gen_mnist_quad_data(args)
@@ -215,9 +232,10 @@ Ha = Chain(
 Encoder = let
     enc1 = Chain(
         x -> reshape(x, 28, 28, 1, :),
-        Conv((5, 5), 1 => 32, relu, pad=(1, 1)),
-        Conv((5, 5), 32 => 32, relu, pad=(1, 1)),
-        Conv((5, 5), 32 => 32, relu, pad=(1, 1)),
+        Conv((5, 5), 1 => 32,),
+        BatchNorm(32, relu),
+        BasicBlock(32 => 32, +),
+        BasicBlock(32 => 32, +),
         BasicBlock(32 => 32, +),
         BasicBlock(32 => 32, +),
         BasicBlock(32 => 32, +),
@@ -255,7 +273,7 @@ save_dir = get_save_dir(save_folder, alias)
 ## =====
 # todo - separate sensing network?
 args[:seqlen] = 4
-args[:scale_offset] = 2.2f0
+args[:scale_offset] = 2.0f0
 
 # args[:λpatch] = Float32(1 / 2 * args[:seqlen])
 args[:λpatch] = 0.0f0
@@ -263,18 +281,18 @@ args[:λf] = 1.0f0
 args[:λ] = 0.001f0
 args[:D] = Normal(0.0f0, 1.0f0)
 
-args[:α] = 1.0f0
-args[:β] = 0.5f0
+args[:α] = 4.0f0
+args[:β] = 0.02f0
 
 
-args[:η] = 1e-4
+args[:η] = 4e-5
 opt = ADAM(args[:η])
 lg = new_logger(joinpath(save_folder, alias), args)
 log_value(lg, "learning_rate", opt.eta)
 ## ====
 begin
     Ls = []
-    for epoch in 1:200
+    for epoch in 1:400
         if epoch % 50 == 0
             opt.eta = 0.67 * opt.eta
             log_value(lg, "learning_rate", opt.eta)
@@ -289,7 +307,7 @@ begin
         log_value(lg, "test_loss", L)
         @info "Test loss: $L"
         push!(Ls, ls)
-        if epoch % 50 == 0
+        if epoch % 25 == 0
             save_model((Hx, Ha, Encoder), joinpath(save_folder, alias, savename(args) * "_$(epoch)eps"))
         end
     end
