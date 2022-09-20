@@ -20,7 +20,7 @@ args = Dict(
     :esz => 32, :add_offset => true, :fa_out => identity, :f_z => identity,
     :asz => 6, :glimpse_len => 4, :seqlen => 5, :λ => 1.0f-3, :λpatch => Float32(1 / 4),
     :scale_offset => 2.8f0, :scale_offset_sense => 3.2f0,
-    :λf => 0.167f0, :D => Normal(0.0f0, 1.0f0)
+    :λf => 0.167f0, :D => Normal(0.0f0, 1.0f0), :dropout => 0.2,
 )
 args[:imzprod] = prod(args[:img_size])
 
@@ -91,6 +91,7 @@ function init_H!(H; f=0.4f0)
 end
 
 function train_model(opt, ps, train_data; args=args, epoch=1, logger=nothing, D=args[:D])
+    Flux.trainmode!((Hx, Ha, Encoder))
     progress_tracker = Progress(length(train_data), 1, "Training epoch $epoch :)")
     losses = zeros(length(train_data))
     # initial z's drawn from N(0,1)
@@ -140,10 +141,14 @@ Hx = Chain(
     Dense(64, 64),
     LayerNorm(64, elu),
     Dense(64, 64),
+    Dropout(args[:dropout]),
+    LayerNorm(64, elu),
+    Dropout(args[:dropout]),
+    Dense(64, 64),
+    Dropout(args[:dropout]),
     LayerNorm(64, elu),
     Dense(64, 64),
-    LayerNorm(64, elu),
-    Dense(64, 64),
+    Dropout(args[:dropout]),
     LayerNorm(64, elu),
     Dense(64, sum(Hx_bounds) + args[:π], bias=false),
 ) |> gpu
@@ -151,8 +156,10 @@ Hx = Chain(
 Ha = Chain(
     LayerNorm(args[:π],),
     Dense(args[:π], 64),
+    Dropout(args[:dropout]),
     LayerNorm(64, elu),
     Dense(64, 64),
+    Dropout(args[:dropout]),
     LayerNorm(64, elu),
     Dense(64, sum(Ha_bounds) + args[:asz], bias=false),
 ) |> gpu
@@ -179,8 +186,10 @@ Encoder = let
         Dense(outsz[1], 64,),
         LayerNorm(64, elu),
         Dense(64, 64,),
+        Dropout(args[:dropout]),
         LayerNorm(64, elu),
         Dense(64, 64,),
+        Dropout(args[:dropout]),
         LayerNorm(64, elu),
         Split(
             Dense(64, args[:π]),
@@ -191,7 +200,10 @@ end |> gpu
 
 ps = Flux.params(Hx, Ha, Encoder)
 
-## =====
+## ======
+
+## ======
+
 inds = sample(1:args[:bsz], 6, replace=false)
 p = plot_recs(sample_loader(test_loader), inds)
 
@@ -229,6 +241,7 @@ begin
             log_value(lg, "learning_rate", opt.eta)
         end
         ls = train_model(opt, ps, train_loader; epoch=epoch, logger=lg)
+        Flux.testmode!((Hx, Ha, Encoder))
         inds = sample(1:args[:bsz], 6, replace=false)
         p = plot_recs(sample_loader(test_loader), inds)
         p2 = plot_recs(sample_loader(val_loader), inds)

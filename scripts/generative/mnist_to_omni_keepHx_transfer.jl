@@ -8,6 +8,7 @@ using IterTools: partition, iterated
 using Flux: batch, unsqueeze, flatten
 using Flux.Data: DataLoader
 using Distributions
+using Images # reizing and filtering
 using StatsBase: sample
 using Random: shuffle
 
@@ -27,67 +28,43 @@ args[:imzprod] = prod(args[:img_size])
 
 ## =====
 
-device!(0)
+device!(1)
 
 dev = gpu
 
 ## =====
-function mnist_quadrants(xs; args=args)
-    tmp = collect(partition(eachslice(xs, dims=3), 4))
-    a = map(x -> vcat(x[1:2]...), tmp)
-    b = map(x -> vcat(x[3:4]...), tmp)
-    c = map(x -> hcat(x...), zip(a, b))
-    resized_vec = map(x -> imresize(x, args[:img_size]), c)
-    # return fast_img_concat(resized_vec)
+train_digits, train_labels = Omniglot(split=:train)[:]
+test_digits, test_labels = Omniglot(split=:test)[:]
+
+train_digits = 1.0f0 .- imresize(train_digits, (28, 28))
+test_digits = 1.0f0 .- imresize(test_digits, (28, 28))
+
+# binarize
+
+function binarize(x; thresh=0.5f0)
+    x[x.<=thresh] .= 0.0f0
+    x[x.>thresh] .= 1.0f0
+    return x
 end
 
-function fast_img_concat(xs; args=args)
-    cat_ims = zeros(Float32, args[:img_size]..., length(xs))
-    Threads.@threads for i in 1:length(xs)
-        cat_ims[:, :, i] = xs[i]
-    end
-    return cat_ims
+## ===== filter
+train_chars = zeros(Float32, size(train_digits))
+test_chars = zeros(Float32, size(test_digits))
+
+Threads.@threads for i in 1:size(train_digits, 3)
+    train_chars[:, :, i] = imfilter(train_digits[:, :, i], Kernel.gaussian(0.5f0))
 end
 
-function gen_mnist_quad_data_mixed(args)
-    train_digits, train_labels = MNIST(split=:train)[:]
-    test_digits, test_labels = MNIST(split=:test)[:]
-    train_ims = mnist_quadrants(train_digits)
-    test_ims = mnist_quadrants(test_digits)
-    train_digit_vec = collect(eachslice(train_digits, dims=3))
-    test_digit_vec = collect(eachslice(test_digits, dims=3))
-
-    train_data = fast_img_concat(shuffle([train_ims; train_digit_vec]))
-    test_data = fast_img_concat(shuffle([test_ims; test_digit_vec]))
-
-    return train_data, test_data
-
+Threads.@threads for i in 1:size(test_digits, 3)
+    test_chars[:, :, i] = imfilter(test_digits[:, :, i], Kernel.gaussian(0.5f0))
 end
+## =====
 
-function shuffle_concat_mnist(digits)
-    train_digit_vec = shuffle(collect(eachslice(digits, dims=3)))
-    fast_img_concat(train_digit_vec)
-end
+# train_labels = Float32.(Flux.onehotbatch(train_labels, 0:9))
+# test_labels = Float32.(Flux.onehotbatch(test_labels, 0:9))
 
-function gen_mnist_quad_data(args; n_repeats=3)
-    train_digits, train_labels = MNIST(split=:train)[:]
-    test_digits, test_labels = MNIST(split=:test)[:]
-    train_ims = [mnist_quadrants(shuffle_concat_mnist(train_digits)) for _ in 1:n_repeats]
-    test_ims = [mnist_quadrants(shuffle_concat_mnist(test_digits)) for _ in 1:n_repeats]
-
-    train_data = fast_img_concat(vcat(train_ims...))
-    test_data = fast_img_concat(vcat(test_ims...))
-
-    return train_data, test_data
-end
-
-# train_data, test_data = gen_mnist_quad_data(args)
-train_digits, train_labels = MNIST(split=:train)[:]
-test_digits, test_labels = MNIST(split=:test)[:]
-train_loader = DataLoader((train_digits |> dev), batchsize=args[:bsz], shuffle=true, partial=false)
-test_loader = DataLoader((test_digits |> dev), batchsize=args[:bsz], shuffle=true, partial=false)
-
-
+train_loader = DataLoader(train_chars |> dev, batchsize=args[:bsz], shuffle=true, partial=false)
+test_loader = DataLoader(test_chars |> dev, batchsize=args[:bsz], shuffle=true, partial=false)
 ## =====
 dev = has_cuda() ? gpu : cpu
 
@@ -264,7 +241,7 @@ Hx, Ha, Encoder = load(modelpath)[:model] |> gpu
 ## =====
 
 save_folder = "gen_3lvl"
-alias = "double_H_mnist_rand_loc_generative_digit_encoder_Ha_v0"
+alias = "double_H_mnist2omni_rand_loc_generative_digit_encoder_Ha_v0"
 save_dir = get_save_dir(save_folder, alias)
 
 ## =====
@@ -283,7 +260,6 @@ args[:β] = 0.01f0
 ## =====
 inds = sample(1:args[:bsz], 6, replace=false)
 p = plot_recs(sample_loader(test_loader), inds)
-log_image(lg, "rec_original_enc", p)
 
 ## =====
 args[:η] = 4e-5
@@ -322,5 +298,3 @@ end
 
 
 ## ======
-
-save_model((Hx, Ha, Encoder), joinpath(save_folder, alias, savename(args) * "_25eps"))

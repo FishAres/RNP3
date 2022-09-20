@@ -33,11 +33,14 @@ device!(1)
 
 dev = gpu
 ## =====
-datadict = load(datadir("exp_pro", "eth80_50x50_shuffled.jld2"))
-data_train, data_test = [datadict[key] for key in keys(datadict)]
 
-train_loader = DataLoader(data_train |> dev, batchsize=args[:bsz], shuffle=true, partial=false)
-test_loader = DataLoader(data_test |> dev, batchsize=args[:bsz], shuffle=true, partial=false)
+data = load(datadir("exp_pro", "eth80_segmented_train_test.jld2"))
+
+train_data = data["train_data"]
+test_data = data["test_data"]
+
+train_loader = DataLoader(train_data |> dev, batchsize=args[:bsz], shuffle=true, partial=false)
+test_loader = DataLoader(test_data |> dev, batchsize=args[:bsz], shuffle=true, partial=false)
 
 ## =====
 dev = has_cuda() ? gpu : cpu
@@ -49,8 +52,8 @@ const zeros_vec = zeros(1, 1, args[:bsz]) |> dev
 diag_vec = [[1.0f0 0.0f0; 0.0f0 1.0f0] for _ in 1:args[:bsz]]
 const diag_mat = cat(diag_vec..., dims=3) |> dev
 const diag_off = cat(1.0f-6 .* diag_vec..., dims=3) |> dev
-## ===== functions
 
+## ===== functions
 function get_fstate_models(θs, Hx_bounds; args=args, fz=args[:f_z])
     inds = Zygote.ignore() do
         [0; cumsum([Hx_bounds...; args[:π]])]
@@ -122,7 +125,7 @@ end
 ## ====== model
 
 # todo don't bind RNN size to args[:π]
-args[:π] = 200
+args[:π] = 256
 args[:depth_Hx] = 6
 args[:D] = Normal(0.0f0, 1.0f0)
 
@@ -208,7 +211,7 @@ end
 ## =====
 
 save_folder = "gen_2lvl"
-alias = "2lvl_double_H_eth80_50x50_vae_v01"
+alias = "2lvl_double_H_eth80_50x50_segmented_vae_v01"
 save_dir = get_save_dir(save_folder, alias)
 
 ## =====
@@ -221,7 +224,7 @@ args[:λ] = 0.001f0
 
 args[:α] = 1.0f0
 args[:β] = 0.2f0
-
+## =====
 args[:η] = 4e-5
 opt = ADAM(args[:η])
 lg = new_logger(joinpath(save_folder, alias), args)
@@ -232,12 +235,8 @@ begin
     log_value(lg, "eta", opt.eta)
     Ls = []
     for epoch in 1:4000
-        if epoch > 100
-            opt.eta = 4e-5
-            log_value(lg, "eta", opt.eta)
-        end
-        if epoch % 500 == 0
-            opt.eta = opt.eta / 2
+        if epoch % 100 == 0
+            opt.eta = max(0.67 * opt.eta, 4e-7)
             log_value(lg, "eta", opt.eta)
         end
         ls = train_model(opt, ps, train_loader; epoch=epoch, logger=lg)

@@ -8,36 +8,40 @@ using IterTools: partition, iterated
 using Flux: batch, unsqueeze, flatten
 using Flux.Data: DataLoader
 using Distributions
-using Images
 using StatsBase: sample
 using Random: shuffle
-using ParameterSchedulers
+
 
 include(srcdir("gen_vae_utils.jl"))
 
 CUDA.allowscalar(false)
-
-## ======
-
+## ====
 args = Dict(
-    :bsz => 64, :img_size => (50, 50), :img_channels => 3, :π => 32,
-    :esz => 32, :add_offset => true, :fa_out => identity, :f_z => elu,
-    :asz => 6, :glimpse_len => 4, :seqlen => 5, :λ => 1.0f-3, :δL => Float32(1 / 4),
+    :bsz => 64, :img_size => (50, 50), :π => 32, :img_channels => 3,
+    :esz => 32, :add_offset => true, :fa_out => identity, :f_z => identity,
+    :asz => 6, :glimpse_len => 4, :seqlen => 5, :λ => 1.0f-3, :λpatch => Float32(1 / 4),
     :scale_offset => 2.8f0, :scale_offset_sense => 3.2f0,
     :λf => 0.167f0, :D => Normal(0.0f0, 1.0f0),
 )
 args[:imszprod] = prod(args[:img_size])
+
 ## =====
 
-device!(1)
+device!(0)
 
 dev = gpu
-## =====
-datadict = load(datadir("exp_pro", "eth80_50x50_shuffled.jld2"))
-data_train, data_test = [datadict[key] for key in keys(datadict)]
 
-train_loader = DataLoader(data_train |> dev, batchsize=args[:bsz], shuffle=true, partial=false)
-test_loader = DataLoader(data_test |> dev, batchsize=args[:bsz], shuffle=true, partial=false)
+##=====
+
+data = load(datadir("exp_pro", "eth80_segmented_train_test.jld2"))
+
+train_data = data["train_data"]
+test_data = data["test_data"]
+
+train_loader = DataLoader(train_data |> dev, batchsize=args[:bsz], shuffle=true, partial=false)
+test_loader = DataLoader(test_data |> dev, batchsize=args[:bsz], shuffle=true, partial=false)
+x = first(train_loader)
+
 
 ## =====
 dev = has_cuda() ? gpu : cpu
@@ -49,7 +53,7 @@ const zeros_vec = zeros(1, 1, args[:bsz]) |> dev
 diag_vec = [[1.0f0 0.0f0; 0.0f0 1.0f0] for _ in 1:args[:bsz]]
 const diag_mat = cat(diag_vec..., dims=3) |> dev
 const diag_off = cat(1.0f-6 .* diag_vec..., dims=3) |> dev
-## ===== functions
+## =====
 
 function get_fstate_models(θs, Hx_bounds; args=args, fz=args[:f_z])
     inds = Zygote.ignore() do
@@ -60,24 +64,9 @@ function get_fstate_models(θs, Hx_bounds; args=args, fz=args[:f_z])
     Enc_za_z = Chain(HyDense(args[:π] + args[:asz], args[:π], Θ[1], elu), flatten)
 
     f_state = ps_to_RN(get_rn_θs(Θ[2], args[:π], args[:π]); f_out=elu)
+    z0 = fz.(Θ[3])
 
-    # rgb
-    Dec_z_x̂r = Chain(HyDense(args[:π], args[:imszprod], Θ[3], relu6), flatten)
-    Dec_z_x̂g = Chain(HyDense(args[:π], args[:imszprod], Θ[4], relu6), flatten)
-    Dec_z_x̂b = Chain(HyDense(args[:π], args[:imszprod], Θ[5], relu6), flatten)
-
-    Dec_z_x̂ = Chain(
-        Split(
-            Dec_z_x̂r,
-            Dec_z_x̂g,
-            Dec_z_x̂b,
-        ),
-        x -> hcat(unsqueeze.(x, 2)...)
-    )
-
-    z0 = fz.(Θ[6])
-
-    return (Enc_za_z, f_state, Dec_z_x̂), z0
+    return (Enc_za_z, f_state), z0
 end
 
 function get_fpolicy_models(θs, Ha_bounds; args=args)
@@ -88,11 +77,18 @@ function get_fpolicy_models(θs, Ha_bounds; args=args)
 
     Enc_za_a = Chain(HyDense(args[:π] + args[:asz], args[:π], Θ[1], sin), flatten)
     f_policy = ps_to_RN(get_rn_θs(Θ[2], args[:π], args[:π]); f_out=sin)
-    Dec_z_a = Chain(HyDense(args[:π], args[:asz], Θ[3], sin), flatten)
 
-    a0 = sin.(Θ[4])
+    a0 = sin.(Θ[3])
 
-    return (Enc_za_a, f_policy, Dec_z_a), a0
+    return (Enc_za_a, f_policy), a0
+end
+
+
+function get_models(θsz, θsa; args=args, Hx_bounds=Hx_bounds, Ha_bounds=Ha_bounds)
+    (Enc_za_z, f_state), z0 = get_fstate_models(θsz, Hx_bounds; args=args)
+    (Enc_za_a, f_policy), a0 = get_fpolicy_models(θsa, Ha_bounds; args=args)
+    models = f_state, f_policy, Enc_za_z, Enc_za_a, Dec_z_x̂, Dec_z_a
+    return models, z0, a0
 end
 
 function imview_cifar(x)
@@ -119,33 +115,39 @@ function plot_recs(x, inds; plot_seq=true, args=args)
     return plot(p...; layout=(length(inds), 1), size=(600, 800))
 end
 
-## ====== model
 
-# todo don't bind RNN size to args[:π]
-args[:π] = 200
-args[:depth_Hx] = 6
-args[:D] = Normal(0.0f0, 1.0f0)
+## ====
+
+
+args[:π] = 128
 
 l_enc_za_z = (args[:π] + args[:asz]) * args[:π] # encoder (z_t, a_t) -> z_t+1
 l_fx = get_rnn_θ_sizes(args[:π], args[:π])
-l_err_rnn = get_rnn_θ_sizes(args[:π], args[:π]) # also same size lol
 l_dec_x = args[:imszprod] * args[:π] # decoder z -> x̂, no bias
-l_enc_e_z = ((args[:imszprod] * args[:img_channels]) + 1) * args[:π]
 
-Hx_bounds = [l_enc_za_z; l_fx; l_dec_x; l_dec_x; l_dec_x]
+Hx_bounds = [l_enc_za_z; l_fx]
 
 
 l_enc_za_a = (args[:π] + args[:asz]) * args[:π] # encoder (z_t, a_t) -> a_t+1
 l_fa = get_rnn_θ_sizes(args[:π], args[:π]) # same size for now
 l_dec_a = args[:asz] * args[:π] + args[:asz] # decoder z -> a, with bias
 
-Ha_bounds = [l_enc_za_a; l_fa; l_dec_a]
+Ha_bounds = [l_enc_za_a; l_fa]
 
 Hx = Chain(
     LayerNorm(args[:π],),
     Dense(args[:π], 64),
     LayerNorm(64, elu),
-    [Chain(Dense(64, 64), LayerNorm(64, elu)) for _ in 1:args[:depth_Hx]]...,
+    Dense(64, 64),
+    LayerNorm(64, elu),
+    Dense(64, 64),
+    LayerNorm(64, elu),
+    Dense(64, 64),
+    LayerNorm(64, elu),
+    Dense(64, 64),
+    LayerNorm(64, elu),
+    Dense(64, 64),
+    LayerNorm(64, elu),
     Dense(64, sum(Hx_bounds) + args[:π], bias=false),
 ) |> gpu
 
@@ -162,13 +164,9 @@ Ha = Chain(
 Encoder = let
     enc1 = Chain(
         x -> reshape(x, args[:img_size]..., args[:img_channels], :),
-        Conv((5, 5), args[:img_channels] => 32),
+        Conv((5, 5), args[:img_channels] => 32, pad=(1, 1)),
         BatchNorm(32, relu),
-        Conv((5, 5), 32 => 32),
-        BatchNorm(32, relu),
-        Conv((5, 5), 32 => 32),
-        BatchNorm(32, relu),
-        Conv((5, 5), 32 => 32),
+        Conv((5, 5), 32 => 32, pad=(1, 1)),
         BatchNorm(32, relu),
         BasicBlock(32 => 32, +),
         BasicBlock(32 => 32, +),
@@ -197,61 +195,78 @@ Encoder = let
         )
     )
 end |> gpu
-ps = Flux.params(Hx, Ha, Encoder)
 
-## ======
-let
-    inds = sample(1:args[:bsz], 6, replace=false)
-    p = plot_recs(sample_loader(test_loader), inds)
-    display(p)
-end
+Dec_z_a = Dense(args[:π], args[:asz], sin, bias=false) |> gpu
+
+Dec_z_x̂ = Chain(
+    Dense(args[:π], 256),
+    LayerNorm(256, elu),
+    x -> reshape(x, 8, 8, 4, :),
+    ConvTranspose((5, 5), 4 => 32),
+    BatchNorm(32, relu),
+    ConvTranspose((4, 4), 32 => 32, stride=(2, 2), pad=(2, 2)),
+    BatchNorm(32, relu),
+    ConvTranspose((4, 4), 32 => 32, stride=(2, 2), pad=(2, 2)),
+    BatchNorm(32, relu),
+    ConvTranspose((5, 5), 32 => 32,),
+    BatchNorm(32, relu),
+    ConvTranspose((5, 5), 32 => 3, relu)
+) |> gpu
+
+ps = Flux.params(Hx, Ha, Encoder, Dec_z_x̂, Dec_z_a)
+
 ## =====
-
-save_folder = "gen_2lvl"
-alias = "2lvl_double_H_eth80_50x50_vae_v01"
+save_folder = "gen_2lvl_thru"
+alias = "double_H_eth80_50x50_generative_thru_v0"
 save_dir = get_save_dir(save_folder, alias)
 
 ## =====
 # todo - separate sensing network?
 args[:seqlen] = 4
-args[:scale_offset] = 1.8f0
+args[:scale_offset] = 1.5f0
 
+args[:λpatch] = Float32(1 / 8)
 args[:λpatch] = 0.0f0
+args[:λf] = 1.0f0
 args[:λ] = 0.001f0
+args[:D] = Normal(0.0f0, 1.0f0)
 
 args[:α] = 1.0f0
-args[:β] = 0.2f0
+args[:β] = 0.5f0
+
 
 args[:η] = 4e-5
 opt = ADAM(args[:η])
 lg = new_logger(joinpath(save_folder, alias), args)
-# todo try sinusoidal lr schedule
 
 ## ====
+let
+    inds = sample(1:args[:bsz], 6, replace=false)
+    p = plot_recs(sample_loader(test_loader), inds)
+end
+## =====
+
 begin
-    log_value(lg, "eta", opt.eta)
     Ls = []
-    for epoch in 1:4000
-        if epoch > 100
-            opt.eta = 4e-5
-            log_value(lg, "eta", opt.eta)
-        end
-        if epoch % 500 == 0
-            opt.eta = opt.eta / 2
-            log_value(lg, "eta", opt.eta)
+    for epoch in 1:2000
+        if epoch % 200 == 0
+            opt.eta = max(0.67 * opt.eta, 1e-7)
+            log_value(lg, "learning_rate", opt.eta)
         end
         ls = train_model(opt, ps, train_loader; epoch=epoch, logger=lg)
-        inds = sample(1:args[:bsz], 6, replace=false)
-        p = plot_recs(sample_loader(test_loader), inds)
-        display(p)
-        log_image(lg, "recs_$(epoch)", p)
+        if epoch % 10 == 0
+            inds = sample(1:args[:bsz], 6, replace=false)
+            p = plot_recs(sample_loader(test_loader), inds)
+            display(p)
+            log_image(lg, "recs_$(epoch)", p)
+        end
         L = test_model(test_loader)
         log_value(lg, "test_loss", L)
         @info "Test loss: $L"
-        if epoch % 250 == 0
-            save_model((Hx, Ha, Encoder), joinpath(save_folder, alias, savename(args) * "_$(epoch)eps"))
+        push!(Ls, ls)
+        if epoch % 100 == 0
+            save_model((Hx, Ha, Encoder, Dec_z_x̂, Dec_z_a), joinpath(save_folder, alias, savename(args) * "_$(epoch)eps"))
         end
     end
 end
 
-## ====

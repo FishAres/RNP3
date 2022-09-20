@@ -47,7 +47,7 @@ end
     sc = (@view thetas[[1, 4], :]) .+ 1.0f0 .+ scale_offset
     b = sc .* (@view thetas[5:6, :])
     # A_rot = get_rot_mat(@view thetas[2, :])
-    A_rot = get_rot_mat(π32 * (@view thetas[2, :]))
+    A_rot = get_rot_mat(2.0f0 * π32 * (@view thetas[2, :]))
     A_sc = unsqueeze(sc, 2) .* diag_mat
     A_shear = get_shear_mat(@view thetas[3, :])
     return A_rot, A_sc, A_shear, b

@@ -33,11 +33,14 @@ device!(1)
 
 dev = gpu
 ## =====
-datadict = load(datadir("exp_pro", "eth80_50x50_shuffled.jld2"))
-data_train, data_test = [datadict[key] for key in keys(datadict)]
 
-train_loader = DataLoader(data_train |> dev, batchsize=args[:bsz], shuffle=true, partial=false)
-test_loader = DataLoader(data_test |> dev, batchsize=args[:bsz], shuffle=true, partial=false)
+data = load(datadir("exp_pro", "eth80_segmented_train_test.jld2"))
+
+train_data = data["train_data"]
+test_data = data["test_data"]
+
+train_loader = DataLoader(train_data |> dev, batchsize=args[:bsz], shuffle=true, partial=false)
+test_loader = DataLoader(test_data |> dev, batchsize=args[:bsz], shuffle=true, partial=false)
 
 ## =====
 dev = has_cuda() ? gpu : cpu
@@ -49,8 +52,8 @@ const zeros_vec = zeros(1, 1, args[:bsz]) |> dev
 diag_vec = [[1.0f0 0.0f0; 0.0f0 1.0f0] for _ in 1:args[:bsz]]
 const diag_mat = cat(diag_vec..., dims=3) |> dev
 const diag_off = cat(1.0f-6 .* diag_vec..., dims=3) |> dev
-## ===== functions
 
+## ===== functions
 function get_fstate_models(θs, Hx_bounds; args=args, fz=args[:f_z])
     inds = Zygote.ignore() do
         [0; cumsum([Hx_bounds...; args[:π]])]
@@ -122,7 +125,7 @@ end
 ## ====== model
 
 # todo don't bind RNN size to args[:π]
-args[:π] = 200
+args[:π] = 256
 args[:depth_Hx] = 6
 args[:D] = Normal(0.0f0, 1.0f0)
 
@@ -208,7 +211,7 @@ end
 ## =====
 
 save_folder = "gen_2lvl"
-alias = "2lvl_double_H_eth80_50x50_vae_v01"
+alias = "2lvl_double_H_eth80_50x50_segmented_vae_v01_adamw"
 save_dir = get_save_dir(save_folder, alias)
 
 ## =====
@@ -216,31 +219,32 @@ save_dir = get_save_dir(save_folder, alias)
 args[:seqlen] = 4
 args[:scale_offset] = 1.8f0
 
+# args[:λpatch] = Float32(1 / 2args[:seqlen])
 args[:λpatch] = 0.0f0
 args[:λ] = 0.001f0
 
 args[:α] = 1.0f0
 args[:β] = 0.2f0
-
+## =====
 args[:η] = 4e-5
-opt = ADAM(args[:η])
+args[:w_decay] = 0.001
+opt = ADAMW(args[:η])
+opt.os[2].wd = args[:w_decay]
+
 lg = new_logger(joinpath(save_folder, alias), args)
 # todo try sinusoidal lr schedule
 
 ## ====
+
 begin
-    log_value(lg, "eta", opt.eta)
     Ls = []
+    log_value(lg, "eta", opt.os[1].eta)
     for epoch in 1:4000
-        if epoch > 100
-            opt.eta = 4e-5
-            log_value(lg, "eta", opt.eta)
+        if epoch % 200 == 0
+            opt.os[1].eta = max(opt.os[1].eta / 3, 4e-7)
+            log_value(lg, "eta", opt.os[1].eta)
         end
-        if epoch % 500 == 0
-            opt.eta = opt.eta / 2
-            log_value(lg, "eta", opt.eta)
-        end
-        ls = train_model(opt, ps, train_loader; epoch=epoch, logger=lg)
+        train_model(opt, ps, train_loader; epoch=epoch, logger=lg)
         inds = sample(1:args[:bsz], 6, replace=false)
         p = plot_recs(sample_loader(test_loader), inds)
         display(p)

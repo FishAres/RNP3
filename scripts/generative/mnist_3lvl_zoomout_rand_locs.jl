@@ -49,16 +49,14 @@ test_vec = collect(eachslice(test_digits, dims=3))
 train_batches = unsqueeze.(batch.(shuffle(collect(partition(train_vec, args[:bsz])))), 3)
 test_batches = unsqueeze.(batch.(shuffle(collect(partition(test_vec, args[:bsz])))), 3)
 
-args[:scale_offset_canv] = 1.2f0
-
 function get_scrambled_mnist(digit_batches; args=args)
     imgs = []
     Threads.@threads for i in 1:length(digit_batches)
         x = train_batches[i] |> gpu
         thetas = get_rand_thetas(args)
-        out = sample_patch(x, thetas, sampling_grid) |> cpu
+        out = sample_patch(x, thetas, sampling_grid; scale_offset=2.5f0) |> cpu
         for j in 1:size(out, 4)
-            inds = rand(1:args[:bsz], rand(2:4)) # 2-4 digits per image
+            inds = rand(1:args[:bsz], 2) # 2-4 digits per image
             push!(imgs, dropdims(sum(out[:, :, 1, inds], dims=3:4), dims=3) |> cpu)
         end
     end
@@ -75,9 +73,9 @@ end
 
 function get_rand_thetas(args)
     thetas = zeros(Float32, 6, args[:bsz])
-    thetas[[1, 4], :] .= -1.0f0
+    thetas[[1, 4], :] .= -2.0f0
     thetas[5:6, :] .= rand(Uniform(-0.8f0, 0.8f0), 2, args[:bsz])
-    thetas[2, :] .= π32 .* rand(Uniform(0.0f0, 0.8f0), args[:bsz])
+    thetas[2, :] .= π32 .* rand(Uniform(-1.0f0, 1.0f0), args[:bsz])
     thetas[3, :] .= rand(Uniform(-1.0f0, 1.0f0), args[:bsz])
     return thetas |> gpu
 end
@@ -173,7 +171,7 @@ end
 
 # todo don't bind RNN size to args[:π]
 
-args[:π] = 50
+args[:π] = 32
 
 l_enc_za_z = (args[:π] + args[:asz]) * args[:π] # encoder (z_t, a_t) -> z_t+1
 l_fx = get_rnn_θ_sizes(args[:π], args[:π])
@@ -181,7 +179,6 @@ l_dec_x = 784 * args[:π] # decoder z -> x̂, no bias
 l_enc_e_z = (784 + 1) * args[:π]
 
 Hx_bounds = [l_enc_za_z; l_fx; l_dec_x]
-
 
 l_enc_za_a = (args[:π] + args[:asz]) * args[:π] # encoder (z_t, a_t) -> a_t+1
 l_fa = get_rnn_θ_sizes(args[:π], args[:π]) # same size for now
@@ -219,6 +216,9 @@ Encoder = let
         BatchNorm(32, relu),
         Conv((5, 5), 32 => 32),
         BatchNorm(32, relu),
+        Conv((5, 5), 32 => 32),
+        BatchNorm(32, relu),
+        BasicBlock(32 => 32, +),
         BasicBlock(32 => 32, +),
         BasicBlock(32 => 32, +),
         BasicBlock(32 => 32, +),
