@@ -1,51 +1,21 @@
 using Flux
 
-## Indexing helpers
 
-function get_module_sizes(m::Flux.Chain; args=args)
-    sizes, modules = [], []
-    function get_module_sizes_(m, sizes, modules)
-        for l in m.layers
-            if hasfield(typeof(l), :layers)
-                get_module_sizes_(l, sizes, modules)
-            elseif hasfield(typeof(l), :weight)
-                wsz = size(l.weight)
-                b_ = l.bias
-                b_sz = b_ == false ? 0 : size(b_)
-                push!(sizes, (wsz, b_sz))
-                push!(modules, typeof(l))
-            elseif isempty(Flux.params(l))
-                nothing
-            elseif Flux.hasaffine(l) # check for activity normalization
-                psz = size.(Flux.params(l))
-                push!(sizes, (1,))
-                push!(modules, typeof(l))
-            end
-        end
-        return modules, sizes
-    end
-    modules, sizes = get_module_sizes_(m, sizes, modules)
+## ==== some functions
+
+function create_bias(weights::AbstractArray, bias::Bool, dims::Tuple...)
+    bias ? fill!(similar(weights, dims...), 0) : false
+end
+function split_bias(in::Integer, out::Integer, W::AbstractMatrix)
+    ab, bsz = size(W)
+    in_out = (in * out)
+    bsize = ab - in_out
+    W_ = reshape(W[1:in_out, :], out, in, :)
+    b_ = bsize > 0 ? W[in_out+1:end, :] : false
+    W_, b_
 end
 
-function get_params_length(p)
-    ms, szs = get_module_sizes(p)
-    sizes_ = map(x -> prod.(x), szs)
-    map(sum, sizes_)
-end
-
-
-function split_weights(θs, offsets)
-    msz, bsz = size(θs)
-    offsets_full = [0; offsets]
-    ws = [θs[offsets_full[i]+1:offsets_full[i+1], :][:] for i in 1:length(offsets)]
-    ws_flat = vcat(ws...)
-    @assert length(ws_flat) == msz * bsz
-    return ws_flat
-end
-
-
-
-## Dense
+##==== Dense
 
 struct HyDense
     weight
@@ -53,17 +23,7 @@ struct HyDense
     σ
     HyDense(weight, b, σ) = new(weight, b, σ)
 end
-
-
 Flux.@functor HyDense
-
-## ==== create
-
-
-function create_bias(weights::AbstractArray, bias::Bool, dims::Tuple...)
-    bias ? fill!(similar(weights, dims...), 0) : false
-end
-
 
 function HyDense(
     in::Integer,
@@ -78,23 +38,11 @@ function HyDense(
     HyDense(init(out, in, bsz), b, σ)
 end
 
-function split_bias(in::Integer, out::Integer, W::AbstractMatrix)
-    ab, bsz = size(W)
-    in_out = (in * out)
-    bsize = ab - in_out
-    W_ = reshape(W[1:in_out, :], out, in, :)
-    b_ = bsize > 0 ? W[in_out+1:end, :] : false
-    W_, b_
-end
-
 "single parameter matrix W, known input-output dims"
 function HyDense(in::Integer, out::Integer, W::AbstractMatrix, σ=identity)
     W_, b_ = split_bias(in, out, W)
     HyDense(W_, b_, σ)
 end
-
-
-## ==== 
 
 function (m::HyDense)(x::AbstractArray)
     σ = NNlib.fast_act(m.σ, x)  # replaces tanh => tanh_fast, etc
@@ -102,7 +50,6 @@ function (m::HyDense)(x::AbstractArray)
     b_ = isa(m.bias, AbstractArray) ? unsqueeze(m.bias, 2) : m.bias
     return σ.(batched_mul(m.weight, x) .+ b_)
 end
-
 
 function Base.show(io::IO, l::HyDense)
     print(
@@ -118,6 +65,153 @@ function Base.show(io::IO, l::HyDense)
     l.bias == false && print(io, "; bias=false")
     print(io, ")")
 end
+
+## === Conv
+
+struct HyConv
+    weight
+    bias
+    σ
+    stride
+    pad
+    groups
+    HyConv(weight, b, σ, stride, pad, groups) = new(weight, b, σ, stride, pad, groups)
+end
+Flux.@functor HyConv
+
+function split_bias_conv(kernelsize::Tuple, in_channels::Integer, out_channels::Integer, W::AbstractMatrix)
+    bsize = out_channels
+    W_ = reshape(W[1:end-bsize, :], kernelsize..., in_channels, out_channels, :)
+    b_ = bsize > 0 ? W[end-bsize+1:end, :] : false
+    W_, b_
+end
+
+
+function batched_conv(w, x, stride, pad)
+    cat([conv(a, b; stride=stride, pad=pad) for (a, b) in zip(eachslice(x, dims=5), eachslice(w, dims=5))]..., dims=4)
+end
+
+"initialize without weights"
+function HyConv(
+    kernelsize::Tuple,
+    in_channels::Integer,
+    out_channels::Integer,
+    batchsize::Integer,
+    σ=identity,
+    init=Flux.glorot_uniform,
+    bias=true,
+    stride=(1, 1),
+    pad=(0, 0),
+)
+    w = init(kernelsize..., in_channels, out_channels, batchsize)
+    b = create_bias(w, true, (size(w, 4), size(w, 5)))
+    HyConv(w, b, σ, stride, pad)
+end
+
+"single parameter matrix W, known input-output dims"
+function HyConv(kernelsize::Tuple, in_channels::Integer, out_channels::Integer, W::AbstractMatrix, σ=identity, stride=(1, 1), pad=(0, 0))
+    W_, b_ = split_bias_conv(kernelsize, in_channels, out_channels, W)
+    HyConv(W_, b_, σ, stride, pad)
+end
+
+function (m::HyConv)(x::AbstractArray)
+    σ = NNlib.fast_act(m.σ, x)  # replaces tanh => tanh_fast, etc
+    x = length(size(x)) > 4 ? x : unsqueeze(x, 4)
+    b_ = isa(m.bias, AbstractArray) ? unsqueeze(unsqueeze(m.bias, 1), 1) : m.bias
+    return σ.(batched_conv(m.weight, x, m.stride, m.pad) .+ b_)
+end
+
+## ==== conv transpose
+using NNlib: ∇conv_data
+import Flux: conv_transpose_dims, calc_padding
+
+struct HyConvTranspose
+    weight
+    bias
+    σ
+    stride
+    pad
+    dilation
+    groups
+    # HyConvTranspose(weight, b, σ, stride, pad, dilation, groups) = new(weight, b, σ, stride, pad, dilation, groups)
+end
+Flux.@functor HyConvTranspose
+
+function conv_transpose_dims(c::HyConvTranspose, x::AbstractArray)
+    # Calculate size of "input", from ∇conv_data()'s perspective...
+    combined_pad = (c.pad[1:2:end] .+ c.pad[2:2:end])
+    I = (size(x)[1:end-2] .- 1) .* c.stride .+ 1 .+ (size(c.weight)[1:end-3] .- 1) .* c.dilation .- combined_pad
+    C_in = size(c.weight)[end-2] * c.groups
+    batch_size = size(x)[end]
+    # Create DenseConvDims() that looks like the corresponding conv()
+    w_size = size(c.weight)[1:end-1]
+    return DenseConvDims((I..., C_in, batch_size), w_size;
+        stride=c.stride,
+        padding=c.pad,
+        dilation=c.dilation,
+        groups=c.groups
+    )
+end
+
+function split_bias_conv_transpose(kernelsize::Tuple, in_channels::Integer, out_channels::Integer, W::AbstractMatrix)
+    bsize = out_channels
+    W_ = reshape(W[1:end-bsize, :], kernelsize..., out_channels, in_channels, :)
+    b_ = bsize > 0 ? W[end-bsize+1:end, :] : false
+    W_, b_
+end
+
+function batched_conv_transpose(x, w, cdims)
+    cat([∇conv_data(a, b, cdims) for (a, b) in zip(eachslice(x, dims=5), eachslice(w, dims=5))]..., dims=4)
+end
+
+"initialize without weights"
+function HyConvTranspose(
+    kernelsize::Tuple,
+    channels::Pair,
+    batchsize::Integer,
+    σ=identity;
+    init=Flux.glorot_uniform,
+    bias=true,
+    stride=(1, 1),
+    pad=(0, 0),
+    dilation=(1, 1),
+    groups=1
+)
+    w = init(kernelsize..., channels[2], channels[1], batchsize)
+    b = create_bias(w, bias, (size(w, 3), size(w, 5)))
+    # HyConvTranspose(w, b, σ, stride, pad, dilation, groups)
+    HyConvTranspose(w, b, σ; stride, pad, dilation, groups)
+end
+
+"single parameter matrix W, known input-output dims"
+function HyConvTranspose(W::AbstractArray{T,N}, b, σ=identity; stride=1, pad=0, dilation=1, groups=1) where {T,N}
+    stride = expand(Val(N - 3), stride)
+    # println(N, " ", stride)
+    dilation = expand(Val(N - 3), dilation)
+    pad = calc_padding(ConvTranspose, pad, size(W)[1:N-3], dilation, stride)
+    # W_, b_ = split_bias_conv(kernelsize, in_channels, out_channels, W)
+    HyConvTranspose(W, b, σ, stride, pad, dilation, groups)
+end
+
+function HyConvTranspose(kernelsize::Tuple, channels::Pair,
+    W::AbstractMatrix, σ=identity; stride=1, pad=0, dilation=1, groups=1)
+    stride = expand(Val(5 - 3), stride)
+    # println(N, " ", stride)
+    dilation = expand(Val(5 - 3), dilation)
+    pad = calc_padding(ConvTranspose, pad, size(W)[1:5-3], dilation, stride)
+    W_, b_ = split_bias_conv_transpose(kernelsize, channels[1], channels[2], W)
+    HyConvTranspose(W_, b_, σ, stride, pad, dilation, groups)
+end
+
+
+function (m::HyConvTranspose)(x::AbstractArray)
+    σ = NNlib.fast_act(m.σ, x)  # replaces tanh => tanh_fast, etc
+    b_ = isa(m.bias, AbstractArray) ? unsqueeze(unsqueeze(m.bias, 1), 1) : m.bias
+    cdims = conv_transpose_dims(m, x)
+    x = length(size(x)) > 4 ? x : unsqueeze(x, 4)
+    return σ.(batched_conv_transpose(x, m.weight, cdims) .+ b_)
+end
+
 
 ## == RNNs
 @inline bmul(a, b) = dropdims(batched_mul(unsqueeze(a, 1), b); dims=1)

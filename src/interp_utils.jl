@@ -68,17 +68,32 @@ function grid_generator_fast(sampling_grid_2d, thetas; scale_offset=args[:scale_
     return batched_mul(A, sampling_grid_2d) .+ unsqueeze(b, 2)
 end
 
+"add offset to the diagonal of a square matrix
+to make it safe for inversion
+"
+Zygote.@nograd function safe_inv(A; offset=1e-5)
+    T = typeof(A[1])
+    As = copy(A)
+    for i in diagind(A)
+        if As[i] < T(1e-5)
+            As[i] += T(offset)
+        end
+    end
+    return inv(As)
+end
+
+
 "faster to do one matrix inverse but needs (const) diag_off(set) for stability"
-@inline function get_inv_grid(sampling_grid_2d, thetas; scale_offset=args[:scale_offset])
+Zygote.@nograd function get_inv_grid(sampling_grid_2d, thetas; scale_offset=args[:scale_offset])
     A_rot, A_s, A_shear, b = get_affine_mats(thetas; scale_offset=scale_offset)
-    A = batched_mul(batched_mul(A_rot, A_shear), A_s) .+ diag_off
+    A = batched_mul(batched_mul(A_rot, A_shear), A_s) #.+ diag_off
     # A = batched_mul(batched_mul(A_rot, A_shear), A_s)
     # sh_inv = cat(map(inv, eachslice(cpu(A_shear), dims=3))..., dims=3)
     # sc_inv = cat(map(inv, eachslice(cpu(A_s) .+ 1.0f-5, dims=3))..., dims=3)
     # rot_inv = cat(map(inv, eachslice(cpu(A_rot), dims=3))..., dims=3)
     # Ainv = batched_mul(batched_mul(sc_inv, sh_inv), rot_inv) |> gpu
     # Ainv = mul(sc_inv, sh_inv, rot_inv) |> gpu
-    Ainv = cat(map(inv, eachslice(cpu(A), dims=3))..., dims=3) |> gpu
+    Ainv = cat(map(safe_inv, eachslice(cpu(A), dims=3))..., dims=3) |> gpu
     return batched_mul(Ainv, (sampling_grid_2d .- unsqueeze(b, 2)))
 end
 

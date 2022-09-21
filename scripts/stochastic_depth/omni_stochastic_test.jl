@@ -2,6 +2,7 @@ using DrWatson
 @quickactivate "RNP3"
 ENV["GKSwstype"] = "nul"
 
+using LinearAlgebra, Statistics
 using MLDatasets
 using Flux, Zygote, CUDA
 using IterTools: partition, iterated
@@ -68,4 +69,21 @@ diag_vec = [[1.0f0 0.0f0; 0.0f0 1.0f0] for _ in 1:args[:bsz]]
 const diag_mat = cat(diag_vec..., dims=3) |> dev
 const diag_off = cat(1.0f-6 .* diag_vec..., dims=3) |> dev
 ## =====
+
+x = unsqueeze(first(train_loader), 3)
+
+W = randn(Float32, 5, 5, 1, 32, 64) |> gpu
+b = randn(Float32, 32, 64) |> gpu
+
+w = [flatten(W); b]
+
+m = HyConv((5, 5), 1, 32, w)
+
+A = zeros(Float32, 2, 2)
+
+A[diagind(A)[1]] = 1.0f-6
+A
+inv(A)
+
+A[diagind(A)[1]] ≈ 0.0f0
 
