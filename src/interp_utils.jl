@@ -97,7 +97,7 @@ Zygote.@nograd function get_inv_grid(sampling_grid_2d, thetas; scale_offset=args
     return batched_mul(Ainv, (sampling_grid_2d .- unsqueeze(b, 2)))
 end
 
-function sample_patch(x, thetas, sampling_grid; sz=args[:img_size], scale_offset=args[:scale_offset])
+function sample_patch(x, thetas, sampling_grid; args=args, sz=args[:img_size], scale_offset=args[:scale_offset])
     grid = grid_generator_3d(sampling_grid, thetas; scale_offset=scale_offset)
     # grid = grid_generator_fast(sampling_grid, thetas)
     tg = reshape(grid, 2, sz..., size(grid)[end])

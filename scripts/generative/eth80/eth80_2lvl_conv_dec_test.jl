@@ -235,8 +235,6 @@ ps = Flux.params(Hx, Ha, Encoder)
 
 ## ======
 
-c = HyConvTranspose((5, 5), 4 => 32, W) |> gpu
-conv_transpose_dims(c, x)
 let
     inds = sample(1:args[:bsz], 6, replace=false)
     p = plot_recs(sample_loader(test_loader), inds)
@@ -269,7 +267,7 @@ begin
     log_value(lg, "learning_rate", opt.eta)
     Ls = []
     for epoch in 1:2000
-        if epoch > 100
+        if epoch % 100 == 0
             opt.eta = max(0.67 * opt.eta, 1e-7)
             log_value(lg, "learning_rate", opt.eta)
         end

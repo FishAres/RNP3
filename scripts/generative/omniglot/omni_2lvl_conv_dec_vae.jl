@@ -269,10 +269,13 @@ begin
         display(p3)
         log_image(lg, "recs_$(epoch)", p3)
 
-        Ltest = test_model(test_loader)
         Lval = test_model(val_loader)
-        log_value(lg, "test_loss", Ltest)
         log_value(lg, "val_loss", Lval)
+
+        if epoch % 10 == 0
+            Ltest = test_model(test_loader)
+            log_value(lg, "test_loss", Ltest)
+        end
         @info "Test loss: $Ltest - Val loss: $Lval"
         push!(Ls, ls)
         if epoch % 250 == 0
