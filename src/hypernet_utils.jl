@@ -123,7 +123,7 @@ end
 
 ## ==== conv transpose
 using NNlib: ∇conv_data
-import Flux: conv_transpose_dims, calc_padding
+import Flux: conv_transpose_dims, calc_padding, expand
 
 struct HyConvTranspose
     weight
