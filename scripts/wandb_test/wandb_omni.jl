@@ -8,39 +8,54 @@ using IterTools: partition, iterated
 using Flux: batch, unsqueeze, flatten
 using Flux.Data: DataLoader
 using Distributions
-using Images
 using StatsBase: sample
 using Random: shuffle
-using ParameterSchedulers
 
 include(srcdir("gen_vae_utils.jl"))
 
 CUDA.allowscalar(false)
-
-## ======
-
+## ====
 args = Dict(
-    :bsz => 64, :img_size => (50, 50), :img_channels => 3, :π => 32,
-    :esz => 32, :add_offset => true, :fa_out => identity, :f_z => elu,
-    :asz => 6, :glimpse_len => 4, :seqlen => 5, :λ => 1.0f-3, :δL => Float32(1 / 4),
+    :bsz => 64, :img_size => (28, 28), :π => 32, :img_channels => 1,
+    :esz => 32, :add_offset => true, :fa_out => identity, :f_z => identity,
+    :asz => 6, :glimpse_len => 4, :seqlen => 5, :λ => 1.0f-3, :λpatch => Float32(1 / 4),
     :scale_offset => 2.8f0, :scale_offset_sense => 3.2f0,
-    :λf => 0.167f0, :D => Normal(0.0f0, 1.0f0),
+    :λf => 0.167f0, :D => Normal(0.0f0, 1.0f0)
 )
-args[:imszprod] = prod(args[:img_size])
+args[:imzprod] = prod(args[:img_size])
+
 ## =====
 
-device!(0)
+device!(1)
 
 dev = gpu
-## =====
 
-data = load(datadir("exp_pro", "eth80_segmented_train_test.jld2"))
+##=====
 
-train_data = data["train_data"]
-test_data = data["test_data"]
+all_chars = load("../Recur_generative/data/exp_pro/omniglot_train.jld2")
+xs = shuffle(vcat((all_chars[key] for key in keys(all_chars))...))
+num_train = trunc(Int, 0.8 * length(xs))
 
-train_loader = DataLoader(train_data |> dev, batchsize=args[:bsz], shuffle=true, partial=false)
-test_loader = DataLoader(test_data |> dev, batchsize=args[:bsz], shuffle=true, partial=false)
+new_chars = load("../Recur_generative/data/exp_pro/omniglot_eval.jld2")
+xs_new = shuffle(vcat((new_chars[key] for key in keys(new_chars))...))
+
+function fast_cat(xs)
+    x_array = zeros(Float32, size(xs[1])..., length(xs))
+    Threads.@threads for i in 1:length(xs)
+        x_array[:, :, i] = xs[i]
+    end
+    x_array
+end
+
+xs_cat = fast_cat(xs)
+train_chars = xs_cat[:, :, 1:num_train]
+val_chars = xs_cat[:, :, num_train+1:end]
+
+new_xs_cat = fast_cat(xs_new)
+## ====
+train_loader = DataLoader(train_chars |> dev, batchsize=args[:bsz], shuffle=true, partial=false)
+val_loader = DataLoader(val_chars |> dev, batchsize=args[:bsz], shuffle=true, partial=false)
+test_loader = DataLoader(new_xs_cat |> dev, batchsize=args[:bsz], shuffle=true, partial=false)
 
 ## =====
 dev = has_cuda() ? gpu : cpu
@@ -80,13 +95,12 @@ function get_fstate_models(θs, Hx_bounds; args=args, fz=args[:f_z])
 
     # conv decoder
     Dec_z_x̂ = Chain(
-        HyDense(args[:π], 400, Θ[3], elu),
-        x -> reshape(x, 10, 10, 4, :),
-        HyConvTranspose((5, 5), 4 => 64, Θ[4], relu; stride=1),
-        HyConvTranspose((4, 4), 64 => 64, Θ[5], relu; stride=2, pad=2),
-        HyConvTranspose((4, 4), 64 => 3, Θ[6], relu; stride=2, pad=2)
+        HyDense(args[:π], 128, Θ[3], elu),
+        flatten,
+        HyDense(128, 128, Θ[4], elu),
+        HyDense(128, args[:imzprod], Θ[5], relu)
     )
-    z0 = fz.(Θ[7])
+    z0 = fz.(Θ[6])
 
     return (Enc_za_z, f_state, Dec_z_x̂), z0
 end
@@ -104,47 +118,6 @@ function get_fpolicy_models(θs, Ha_bounds; args=args)
     a0 = sin.(Θ[4])
 
     return (Enc_za_a, f_policy, Dec_z_a), a0
-end
-
-function imview_cifar(x)
-    colorview(RGB, permutedims(batched_adjoint(x), [3, 1, 2]))
-end
-
-function plot_rec_cifar(x, out, xs::Vector, ind)
-    out_ = reshape(cpu(out), args[:img_size]..., 3, :)
-    x_ = reshape(cpu(x), args[:img_size]..., 3, size(x)[end])
-    p1 = plot(imview_cifar(out_[:, :, :, ind]), axis=nothing,)
-    p2 = plot(imview_cifar(x_[:, :, :, ind]), axis=nothing, size=(20, 20))
-    p3 = plot([plot(imview_cifar(x[:, :, :, ind]), axis=nothing) for x in xs]...)
-    return plot(p1, p2, p3, layout=(1, 3))
-end
-
-
-function plot_recs(x, inds; plot_seq=true, args=args)
-    full_recs, patches, xys, patches_t = get_loop(x)
-    p = plot_seq ? let
-        patches_ = map(x -> reshape(x, args[:img_size]..., args[:img_channels], size(x)[end]), patches)
-        [plot_rec_cifar(x, full_recs[end], patches_, ind) for ind in inds]
-    end : [plot_rec_cifar(full_recs[end], x, ind) for ind in inds]
-
-    return plot(p...; layout=(length(inds), 1), size=(600, 800))
-end
-
-
-"one iteration"
-function forward_pass(z1, a1, models, x; args=args, scale_offset=args[:scale_offset])
-    f_state, f_policy, Enc_za_z, Enc_za_a, Dec_z_x̂, Dec_z_a = models
-    za = vcat(z1, a1) # todo parallel layer?
-    ez = Enc_za_z(za)
-    ea = Enc_za_a(za)
-    z1 = f_state(ez)
-    # μ, logvar = z1_pre[1:args[:π], :], z1_pre[args[:π]+1:end, :]
-    # z1 = sample_z(μ, logvar, rand(args[:D], args[:π], args[:bsz]) |> gpu)
-    a1 = Dec_z_a(f_policy(ea))
-    x̂ = Dec_z_x̂(z1)
-    patch_t = zoom_in2d(x, a1, sampling_grid; scale_offset=scale_offset) |> flatten
-
-    return z1, a1, x̂, patch_t
 end
 
 function model_loss(x, r; args=args)
@@ -170,24 +143,24 @@ end
 
 
 
-
 ## ====== model
 
 # todo don't bind RNN size to args[:π]
-args[:π] = 256
-args[:depth_Hx] = 6
+args[:π] = 100
+args[:depth_Hx] = 4
 args[:D] = Normal(0.0f0, 1.0f0)
 
 l_enc_za_z = (args[:π] + args[:asz]) * args[:π] # encoder (z_t, a_t) -> z_t+1
 l_fx = get_rnn_θ_sizes(args[:π], args[:π]) # μ, logvar
-# l_dec_x = args[:imszprod] * args[:π] # decoder z -> x̂, no bias
-mdec = Chain(
-    HyDense(args[:π], 400, args[:bsz]),
-    x -> reshape(x, 10, 10, 4, :),
-    HyConvTranspose((5, 5), 4 => 64, args[:bsz]; stride=1),
-    HyConvTranspose((4, 4), 64 => 64, args[:bsz], relu; stride=2, pad=2),
-    HyConvTranspose((4, 4), 64 => 3, args[:bsz], relu; stride=2, pad=2)
+
+mdec = Dec_z_x̂ = Chain(
+    HyDense(args[:π], 128, args[:bsz], elu),
+    flatten,
+    HyDense(128, 128, args[:bsz], elu),
+    flatten,
+    HyDense(128, args[:imzprod], args[:bsz], relu)
 )
+
 l_dec_x = get_param_sizes(mdec)
 
 Hx_bounds = [l_enc_za_z; l_fx; l_dec_x...]
@@ -221,12 +194,6 @@ Encoder = let
         x -> reshape(x, args[:img_size]..., args[:img_channels], :),
         Conv((5, 5), args[:img_channels] => 32),
         BatchNorm(32, relu),
-        Conv((5, 5), 32 => 32),
-        BatchNorm(32, relu),
-        Conv((5, 5), 32 => 32),
-        BatchNorm(32, relu),
-        Conv((5, 5), 32 => 32),
-        BatchNorm(32, relu),
         BasicBlock(32 => 32, +),
         BasicBlock(32 => 32, +),
         BasicBlock(32 => 32, +),
@@ -258,7 +225,6 @@ ps = Flux.params(Hx, Ha, Encoder)
 
 ## ======
 
-
 let
     inds = sample(1:args[:bsz], 6, replace=false)
     p = plot_recs(sample_loader(test_loader), inds)
@@ -267,46 +233,56 @@ end
 ## =====
 
 save_folder = "gen_2lvl"
-alias = "2lvl_double_H_eth80_50x50_vae_v01_conv_dec"
+alias = "omni_2lvl_deeper_dec_v01"
 save_dir = get_save_dir(save_folder, alias)
 
 ## =====
-# todo - separate sensing network?
 args[:seqlen] = 4
 args[:scale_offset] = 2.2f0
 
-args[:λpatch] = 0.001f0
-args[:λ] = 0.001f0
+# args[:λpatch] = Float32(1 / 3args[:seqlen])
+args[:λpatch] = 0.005f0
+args[:λf] = 1.0f0
+args[:λ] = 0.0001f0
+args[:D] = Normal(0.0f0, 1.0f0)
 
 args[:α] = 1.0f0
 args[:β] = 0.2f0
 
-args[:η] = 4e-5
+
+args[:η] = 2e-5
 opt = ADAM(args[:η])
 lg = new_logger(joinpath(save_folder, alias), args)
-# todo try sinusoidal lr schedule
-
+log_value(lg, "learning_rate", opt.eta)
 ## ====
 begin
-    log_value(lg, "learning_rate", opt.eta)
     Ls = []
-    for epoch in 1:500
+    for epoch in 1:1000
         if epoch % 100 == 0
-            opt.eta = max(0.67 * opt.eta, 1e-7)
+            opt.eta = max(0.5 * opt.eta, 1e-7)
             log_value(lg, "learning_rate", opt.eta)
         end
         ls = train_model(opt, ps, train_loader; epoch=epoch, logger=lg)
         inds = sample(1:args[:bsz], 6, replace=false)
         p = plot_recs(sample_loader(test_loader), inds)
-        display(p)
-        log_image(lg, "recs_$(epoch)", p)
-        L = test_model(test_loader)
-        log_value(lg, "test_loss", L)
-        @info "Test loss: $L"
+        p2 = plot_recs(sample_loader(val_loader), inds)
+        p3 = plot(p, p2, layout=(1, 2))
+        display(p3)
+        log_image(lg, "recs_$(epoch)", p3)
+
+        Lval = test_model(val_loader)
+        log_value(lg, "val_loss", Lval)
+        @info "Val loss: $Lval"
+        if epoch % 10 == 0
+            @time Ltest = test_model(test_loader)
+            log_value(lg, "test_loss", Ltest)
+            @info "Test loss: $Ltest"
+        end
+
+        push!(Ls, ls)
         if epoch % 250 == 0
             save_model((Hx, Ha, Encoder), joinpath(save_folder, alias, savename(args) * "_$(epoch)eps"))
         end
     end
 end
 
-## ====
