@@ -1,3 +1,4 @@
+ENV["PYTHON"] = "/gscratch/rao/aresf/miniconda3/bin/python"
 using Hyperopt
 using Wandb
 
