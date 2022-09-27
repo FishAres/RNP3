@@ -276,7 +276,7 @@ ps = Flux.params(Hx, Ha, Encoder, nn_ode.p)
 
 ## ======
 
-z = randn(Float32, args[:π], args[:bsz]) |> gpu
+# z = randn(Float32, args[:π], args[:bsz]) |> gpu
 # a = Hx(z)
 # b = sum(Hx_bounds) + sum(Ha_bounds)
 # size(a, 1) / b

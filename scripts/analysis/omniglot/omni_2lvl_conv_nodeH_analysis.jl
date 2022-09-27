@@ -26,7 +26,7 @@ args[:imzprod] = prod(args[:img_size])
 
 ## =====
 
-device!(2)
+device!(0)
 
 dev = gpu
 
@@ -75,7 +75,9 @@ function get_param_sizes(model)
         if hasproperty(m, :weight)
             wprod = prod(size(m.weight)[1:end-1])
             if hasproperty(m, :bias)
-                wprod += size(m.bias)[1]
+                if m.bias == true
+                    wprod += size(m.bias)[1]
+                end
             end
             push!(nw, wprod)
         end
@@ -150,11 +152,24 @@ end
 
 
 ## ====== model
+using DiffEqFlux, DifferentialEquations
 
 # todo don't bind RNN size to args[:π]
 args[:π] = 64
 args[:D] = Normal(0.0f0, 1.0f0)
-args[:norm_groups] = 8 # no. of groups for groupnorm
+args[:norm_groups] = 8
+args[:seqlen] = 4
+args[:scale_offset] = 2.0f0
+
+# args[:λpatch] = Float32(1 / 3args[:seqlen])
+# args[:λpatch] = 1.0f-4
+args[:λpatch] = 0.0f0
+args[:λ] = 1.0f-6
+args[:D] = Normal(0.0f0, 1.0f0)
+
+args[:α] = 1.0f0
+args[:β] = 0.05f0
+
 
 l_enc_za_z = (args[:π] + args[:asz]) * args[:π] # encoder (z_t, a_t) -> z_t+1
 l_fx = get_rnn_θ_sizes(args[:π], args[:π]) # μ, logvar
@@ -181,63 +196,26 @@ l_dec_a = args[:asz] * args[:π] + args[:asz] # decoder z -> a, with bias
 
 Ha_bounds = [l_enc_za_a; l_fa; l_dec_a]
 
-# Hx = Chain(
-#     LayerNorm(args[:π],),
-#     Dense(args[:π], 64),
-#     LayerNorm(64, elu),
-#     Dense(64, 64),
-#     LayerNorm(64, elu),
-#     Dense(64, 256),
-#     LayerNorm(256, elu),
-#     x -> reshape(x, 8, 8, 4, :),
-#     ConvTranspose((4, 4), 4 => 16, stride=(2, 2), pad=(1, 1)),
-#     GroupNorm(16, 4, elu),
-#     ConvTranspose((4, 4), 16 => 16, stride=(2, 2), pad=(2, 2)),
-#     GroupNorm(16, 4, elu),
-#     ConvTranspose((4, 4), 16 => 16, stride=(2, 2), pad=(2, 2)),
-#     GroupNorm(16, 4, elu),
-#     ConvTranspose((4, 4), 16 => 8, stride=(2, 2), pad=(2, 2), bias=false),
-#     flatten,
-# ) |> gpu
-
-Hx = Chain(
-    LayerNorm(args[:π],),
-    Dense(args[:π], 64),
-    LayerNorm(64, elu),
-    Dense(64, 64),
-    LayerNorm(64, elu),
-    Dense(64, 512),
-    LayerNorm(512, elu),
-    x -> reshape(x, 8, 8, 8, :),
-    Conv((3, 3), 8 => 32, pad=(1, 1)),
-    GroupNorm(32, 16, elu),
-    BasicBlock(32 => 32, +),
-    BasicBlock(32 => 32, +),
-    ConvTranspose((4, 4), 32 => 32, stride=(2, 2), pad=(1, 1)),
-    GroupNorm(32, args[:norm_groups], elu),
-    ConvTranspose((4, 4), 32 => 32, stride=(2, 2), pad=(2, 2)),
-    GroupNorm(32, args[:norm_groups], elu),
-    ConvTranspose((4, 4), 32 => 16, stride=(2, 2), pad=(2, 2)),
-    GroupNorm(16, args[:norm_groups], elu),
-    ConvTranspose((4, 4), 16 => 8, stride=(2, 2), pad=(2, 2), bias=false),
-    flatten,
+dudt = Chain(
+    GroupNorm(32, args[:norm_groups]),
+    Conv((3, 3), 32 => 32, relu, pad=(1, 1)),
+    GroupNorm(32, args[:norm_groups]),
 ) |> gpu
 
-for p in Flux.params(Hx)
-    p ./= 10.0f0
+nn_ode = NeuralODE(dudt, (0.0f0, 2.0f0), Tsit5(), save_everystep=false,
+    reltol=1e-3, abstol=1e-3, save_start=false) |> gpu
+
+function DiffEqArray_to_Array(x)
+    xarr = gpu(x)
+    return xarr[:, :, :, :, 1]
 end
 
-Ha = Chain(
-    LayerNorm(args[:π],),
-    Dense(args[:π], 64),
-    LayerNorm(64, elu),
-    Dense(64, 64),
-    LayerNorm(64, elu),
-    Dense(64, sum(Ha_bounds) + args[:asz], bias=false),
-) |> gpu
+modelpath = "saved_models/gen_2lvl/omni_2lvl_conv_node_H_v0/add_offset=true_asz=6_bsz=64_esz=32_glimpse_len=4_img_channels=1_imzprod=784_norm_groups=8_scale_offset=2.0_scale_offset_sense=3.2_seqlen=4_α=1.0_β=0.05_η=0.0001_λ=1e-6_λf=0.167_λpatch=0.0_π=64_100eps.bson"
 
+Hx, Ha, Encoder = load(modelpath)[:model] |> gpu
 
-Encoder = let
+Encoder_old = Encoder
+Encoder_new = Encoder = let
     enc1 = Chain(
         x -> reshape(x, args[:img_size]..., args[:img_channels], :),
         Conv((5, 5), args[:img_channels] => 32),
@@ -275,10 +253,11 @@ Encoder = let
         )
     )
 end |> gpu
-ps = Flux.params(Hx, Ha, Encoder)
-
+ps = Flux.params(Encoder)
 ## ======
 
+
+## ======
 # z = randn(Float32, args[:π], args[:bsz]) |> gpu
 # a = Hx(z)
 # b = sum(Hx_bounds) + sum(Ha_bounds)
@@ -291,22 +270,11 @@ let
 end
 ## =====
 
-save_folder = "gen_2lvl"
-alias = "omni_2lvl_convH_v01_reslayers_H"
+save_folder = "gen_2lvl_analysis"
+alias = "omni_2lvl_conv_node_H_v0_analysis"
 save_dir = get_save_dir(save_folder, alias)
 
 ## =====
-args[:seqlen] = 4
-args[:scale_offset] = 2.0f0
-
-# args[:λpatch] = Float32(1 / 3args[:seqlen])
-args[:λpatch] = 1.0f-4
-args[:λ] = 1.0f-6
-args[:D] = Normal(0.0f0, 1.0f0)
-
-args[:α] = 1.0f0
-args[:β] = 0.05f0
-
 
 args[:η] = 1e-4
 opt = ADAM(args[:η])
@@ -315,11 +283,7 @@ log_value(lg, "learning_rate", opt.eta)
 ## ====
 begin
     Ls = []
-    for epoch in 1:400
-        if epoch % 50 == 0
-            opt.eta = max(0.6 * opt.eta, 1e-7)
-            log_value(lg, "learning_rate", opt.eta)
-        end
+    for epoch in 1:20
         ls = train_model(opt, ps, train_loader; epoch=epoch, logger=lg)
         inds = sample(1:args[:bsz], 6, replace=false)
         p = plot_recs(sample_loader(test_loader), inds)
