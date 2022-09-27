@@ -27,7 +27,7 @@ args[:imszprod] = prod(args[:img_size])
 
 ## =====
 
-device!(0)
+device!(1)
 
 dev = gpu
 
@@ -75,8 +75,8 @@ function get_fpolicy_models(θs, Ha_bounds; args=args)
     end
     Θ = [θs[inds[i]+1:inds[i+1], :] for i in 1:length(inds)-1]
 
-    Enc_za_a = Chain(HyDense(args[:π] + args[:asz], args[:π], Θ[1], sin), flatten)
-    f_policy = ps_to_RN(get_rn_θs(Θ[2], args[:π], args[:π]); f_out=sin)
+    Enc_za_a = Chain(HyDense(args[:π] + args[:asz], args[:π], Θ[1], elu), flatten)
+    f_policy = ps_to_RN(get_rn_θs(Θ[2], args[:π], args[:π]); f_out=elu)
 
     a0 = sin.(Θ[3])
 
@@ -217,7 +217,7 @@ ps = Flux.params(Hx, Ha, Encoder, Dec_z_x̂, Dec_z_a)
 
 ## =====
 save_folder = "gen_2lvl_thru"
-alias = "double_H_eth80_50x50_generative_thru_v0"
+alias = "double_H_eth80_50x50_generative_thru_v01"
 save_dir = get_save_dir(save_folder, alias)
 
 ## =====
@@ -227,7 +227,6 @@ args[:scale_offset] = 1.5f0
 
 args[:λpatch] = Float32(1 / 8)
 args[:λpatch] = 0.0f0
-args[:λf] = 1.0f0
 args[:λ] = 0.001f0
 args[:D] = Normal(0.0f0, 1.0f0)
 
@@ -264,7 +263,7 @@ begin
         log_value(lg, "test_loss", L)
         @info "Test loss: $L"
         push!(Ls, ls)
-        if epoch % 100 == 0
+        if epoch % 500 == 0
             save_model((Hx, Ha, Encoder, Dec_z_x̂, Dec_z_a), joinpath(save_folder, alias, savename(args) * "_$(epoch)eps"))
         end
     end

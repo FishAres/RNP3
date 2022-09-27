@@ -27,7 +27,7 @@ args[:imzprod] = prod(args[:img_size])
 
 ## =====
 
-device!(2)
+device!(0)
 
 dev = gpu
 
@@ -127,7 +127,8 @@ function get_fpolicy_models(θs, Ha_bounds; args=args)
     return (Enc_za_a, f_policy, Dec_z_a), a0
 end
 
-function model_loss(x, r; args=args)
+function model_loss(model, x, r; args=args)
+    Encoder, Hx, Ha = model
     μ, logvar = Encoder(x)
     z = sample_z(μ, logvar, r)
     θsz = Hx(z)
@@ -156,7 +157,7 @@ function train_model(model, opt, ps, train_data, args; epoch=1, logger=nothing, 
     rs = [rand(D, args[:π], args[:bsz]) for _ in 1:length(train_data)] |> gpu
     for (i, x) in enumerate(train_data)
         loss, grad = withgradient(ps) do
-            rec_loss, klqp = model_loss(x, rs[i])
+            rec_loss, klqp = model_loss(model, x, rs[i])
             logger !== nothing && Zygote.ignore() do
                 log_value(lg, "rec_loss", rec_loss)
                 log_value(lg, "KL loss", klqp)
@@ -177,7 +178,7 @@ function test_model(model, test_data; D=args[:D])
     rs = [rand(D, args[:π], args[:bsz]) for _ in 1:length(test_data)] |> gpu
     L = 0.0f0
     for (i, x) in enumerate(test_data)
-        rec_loss, klqp = model_loss(x, rs[i])
+        rec_loss, klqp = model_loss(model, x, rs[i])
         L += args[:α] * rec_loss + args[:β] * klqp
     end
     return L / length(test_data)
@@ -285,17 +286,6 @@ function get_model(args)
     return Encoder, Hx, Ha, Hx_bounds, Ha_bounds
 end
 
-Encoder, Hx, Ha, Hx_bounds, Ha_bounds = get_model(args)
-ps = nothing
-
-
-## ======
-
-let
-    inds = sample(1:args[:bsz], 6, replace=false)
-    p = plot_recs(sample_loader(val_loader), inds)
-    display(p)
-end
 ## =====
 
 save_folder = "gen_2lvl"
@@ -308,9 +298,11 @@ args[:β] = 0.05f0
 args[:seqlen] = 4
 
 # function run_training_thingy(πsz, scale_offset, λ, λpatch, η)
-function run_training_thingy(model, opt, ps, args)
-
-    # ps = Flux.params(Hx, Ha, Encoder)
+# function run_training_thingy(model, opt, ps, args)
+function run_training_thingy(opt, args)
+    Encoder, Hx, Ha, Hx_bounds, Ha_bounds = get_model(args)
+    model = Encoder, Hx, Ha
+    ps = Flux.params(Hx, Ha, Encoder)
     for epoch in 1:20
         ls = train_model(model, opt, ps, train_loader, args; epoch=epoch, logger=nothing)
         inds = sample(1:args[:bsz], 6, replace=false)
@@ -324,31 +316,30 @@ function run_training_thingy(model, opt, ps, args)
 
 end
 
+## =====
+
 # beware of confusing macro syntax - check commas
+
 ho = @hyperopt for i = 10,
-    sampler = RandomSampler(),
-    πsz = [64, 96, 128],
+    sampler = Hyperband(R=50, η=3, inner=BOHB()),
+    πsz = LinRange(64, 256, 20),
     scale_offset = LinRange(1.8, 2.2, 4),
     λpatch = LinRange(0.0, 0.00, 5),
     λ = LinRange(0.0, 0.00, 5),
-    η = LinRange(1e-6, 1e-4, 5)
+    η = LinRange(1e-5, 1e-4, 5)
 
     args[:scale_offset] = Float32(scale_offset)
     args[:λ] = Float32(λ)
     args[:λpatch] = Float32(λpatch)
     args[:η] = η
-    args[:π] = πsz
+    args[:π] = trunc(Int, πsz)
 
     opt = ADAM(args[:η])
-    Encoder, Hx, Ha, Hx_bounds, Ha_bounds = get_model(args)
-    model = Encoder, Hx, Ha
-    ps = Flux.params(Encoder, Hx, Ha)
 
-    println(πsz, scale_offset, λpatch, λ, η)
-    cost = run_training_thingy((Encoder, Hx, Ha), opt, Flux.params(Encoder, Hx, Ha), args)
+    # println("π = $(trunc(Int, πsz)), sc_offset = $(scale_offset), λpatch, λ, η")
+    cost = run_training_thingy(opt, args)
 
 end
-
 ## =====
 
 

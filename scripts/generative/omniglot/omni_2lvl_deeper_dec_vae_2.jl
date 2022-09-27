@@ -26,7 +26,7 @@ args[:imzprod] = prod(args[:img_size])
 
 ## =====
 
-device!(1)
+device!(0)
 
 dev = gpu
 
@@ -111,8 +111,8 @@ function get_fpolicy_models(θs, Ha_bounds; args=args)
     end
     Θ = [θs[inds[i]+1:inds[i+1], :] for i in 1:length(inds)-1]
 
-    Enc_za_a = Chain(HyDense(args[:π] + args[:asz], args[:π], Θ[1], sin), flatten)
-    f_policy = ps_to_RN(get_rn_θs(Θ[2], args[:π], args[:π]); f_out=sin)
+    Enc_za_a = Chain(HyDense(args[:π] + args[:asz], args[:π], Θ[1], elu), flatten)
+    f_policy = ps_to_RN(get_rn_θs(Θ[2], args[:π], args[:π]); f_out=elu)
     Dec_z_a = Chain(HyDense(args[:π], args[:asz], Θ[3], sin), flatten)
 
     a0 = sin.(Θ[4])
@@ -146,8 +146,8 @@ end
 ## ====== model
 
 # todo don't bind RNN size to args[:π]
-args[:π] = 96
-args[:depth_Hx] = 4
+args[:π] = 64
+args[:depth_Hx] = 5
 args[:D] = Normal(0.0f0, 1.0f0)
 
 l_enc_za_z = (args[:π] + args[:asz]) * args[:π] # encoder (z_t, a_t) -> z_t+1
@@ -238,19 +238,17 @@ save_dir = get_save_dir(save_folder, alias)
 
 ## =====
 args[:seqlen] = 4
-args[:scale_offset] = 2.2f0
-
+args[:scale_offset] = 1.8f0
 # args[:λpatch] = Float32(1 / 3args[:seqlen])
-args[:λpatch] = 0.005f0
-args[:λf] = 1.0f0
-args[:λ] = 0.0001f0
+args[:λpatch] = 0.00f0
+args[:λ] = 0.0f0
 args[:D] = Normal(0.0f0, 1.0f0)
 
 args[:α] = 1.0f0
-args[:β] = 0.2f0
+args[:β] = 0.1f0
 
 
-args[:η] = 2e-5
+args[:η] = 1e-4
 opt = ADAM(args[:η])
 lg = new_logger(joinpath(save_folder, alias), args)
 log_value(lg, "learning_rate", opt.eta)
@@ -280,7 +278,7 @@ begin
         end
 
         push!(Ls, ls)
-        if epoch % 250 == 0
+        if epoch % 100 == 0
             save_model((Hx, Ha, Encoder), joinpath(save_folder, alias, savename(args) * "_$(epoch)eps"))
         end
     end
