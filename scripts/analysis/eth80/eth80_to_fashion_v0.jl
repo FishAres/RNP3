@@ -33,15 +33,21 @@ device!(2)
 
 dev = gpu
 ## =====
+train_data, train_labels = FashionMNIST(split=:train)[:]
+test_data, test_labels = FashionMNIST(split=:test)[:]
 
-data = load(datadir("exp_pro", "eth80_segmented_train_test.jld2"))
+train_data = imresize(train_data, args[:img_size])
+test_data = imresize(test_data, args[:img_size])
 
-train_data = data["train_data"]
-test_data = data["test_data"]
+train_data = unsqueeze(train_data, 3)
+train_data = cat(train_data, train_data, train_data, dims=3)
+
+test_data = unsqueeze(test_data, 3)
+test_data = cat(test_data, test_data, test_data, dims=3)
 
 train_loader = DataLoader(train_data |> dev, batchsize=args[:bsz], shuffle=true, partial=false)
 test_loader = DataLoader(test_data |> dev, batchsize=args[:bsz], shuffle=true, partial=false)
-
+x = first(test_loader)
 ## =====
 dev = has_cuda() ? gpu : cpu
 
@@ -200,19 +206,73 @@ modelpath = "saved_models/gen_2lvl/2lvl_double_H_eth80_50x50_vae_v01_conv_dec_de
 
 Hx, Ha, Encoder = load(modelpath)[:model] |> gpu
 
+
+Ha = Chain(
+    LayerNorm(args[:π],),
+    Dense(args[:π], 64),
+    LayerNorm(64, elu),
+    Dense(64, 64),
+    LayerNorm(64, elu),
+    Dense(64, sum(Ha_bounds) + args[:asz], bias=false),
+) |> gpu
+
+
+Encoder = let
+    enc1 = Chain(
+        x -> reshape(x, args[:img_size]..., args[:img_channels], :),
+        Conv((5, 5), args[:img_channels] => 32),
+        BatchNorm(32, relu),
+        Conv((5, 5), 32 => 32),
+        BatchNorm(32, relu),
+        Conv((5, 5), 32 => 32),
+        BatchNorm(32, relu),
+        Conv((5, 5), 32 => 32),
+        BatchNorm(32, relu),
+        BasicBlock(32 => 32, +),
+        BasicBlock(32 => 32, +),
+        BasicBlock(32 => 32, +),
+        BasicBlock(32 => 32, +),
+        BasicBlock(32 => 32, +),
+        BasicBlock(32 => 32, +),
+        BasicBlock(32 => 32, +),
+        BasicBlock(32 => 32, +),
+        flatten,
+    )
+    outsz = Flux.outputsize(enc1, (args[:img_size]..., args[:img_channels], args[:bsz]))
+    Chain(
+        enc1,
+        Dense(outsz[1], 64,),
+        LayerNorm(64, elu),
+        Dense(64, 64,),
+        LayerNorm(64, elu),
+        Dense(64, 64,),
+        LayerNorm(64, elu),
+        Dense(64, 64,),
+        LayerNorm(64, elu),
+        Split(
+            Dense(64, args[:π]),
+            Dense(64, args[:π])
+        )
+    )
+end |> gpu
+ps = Flux.params(Ha, Encoder)
+
+## =====
+
 let
     inds = sample(1:args[:bsz], 6, replace=false)
     p = plot_recs(sample_loader(test_loader), inds)
     display(p)
 end
-## =====
+
+## ======
 
 save_folder = "gen_2lvl"
-alias = "2lvl_double_H_eth80_50x50_vae_v02_conv_node_H_conv_dec"
+alias = "eth80_50x50_to_fashion_v0"
 save_dir = get_save_dir(save_folder, alias)
 
 ## =====
-
+# todo - separate sensing network?
 args[:seqlen] = 4
 args[:scale_offset] = 2.0f0
 
@@ -222,89 +282,31 @@ args[:λ] = 1.0f-5
 
 args[:α] = 1.0f0
 args[:β] = 0.2f0
-## ======
-x = first(test_loader)
 
-function get_outputs(z)
-    θsz = Hx(z)
-    θsa = Ha(z)
-    models, z0, a0 = get_models(θsz, θsa; args=args)
-    z1, a1, x̂, patch_t = forward_pass(z0, a0, models, x; scale_offset=args[:scale_offset])
-    out_small = full_sequence(z1, patch_t)
-    out = sample_patch(out_small, a1, sampling_grid)
-    for t = 2:args[:seqlen]
-        z1, a1, x̂, patch_t = forward_pass(z1, a1, models, x; scale_offset=args[:scale_offset])
-        out_small = full_sequence(z1, patch_t)
-        out += sample_patch(out_small, a1, sampling_grid)
-    end
-    return out
-end
+args[:η] = 4e-5
+opt = ADAM(args[:η])
+lg = new_logger(joinpath(save_folder, alias), args)
+# todo try sinusoidal lr schedule
 
-function plot_sample(z; n=nothing, resize=true)
-    bsz = size(z)[end]
-    n = n === nothing ? trunc(Int, sqrt(bsz)) : n
-    n_samples = n^2
-    out = cpu(get_outputs(z))[:, :, :, 1:n_samples]
-    a = partition(collect(eachslice(out, dims=4)), n)
-    b = map(x -> vcat(x...), a)
-    c = hcat(b...)
-    c = resize ? imresize(c, (500, 500)) : c
-    colorview(RGB, permutedims(c, [3, 1, 2]))
-    # plot(img)
-end
-
+## ====
 begin
-    z = rand(args[:D], args[:π], args[:bsz]) |> gpu
-    p = plot(plot_sample(z; n=5), axis=nothing)
-end
-
-p = plot(plot_sample(z; n=5), axis=nothing)
-
-savefig(p, "plots/sampling/eth80/sampling_3.png")
-## ======
-
-
-
-
-## === clustering
-function all_zs(x)
-    z1s, z2s = [], []
-    μ, logvar = Encoder(x)
-    θsz = Hx(μ)
-    θsa = Ha(μ)
-    models, z0, a0 = get_models(θsz, θsa; args=args)
-    z1, a1, x̂, patch_t = forward_pass(z0, a0, models, x; scale_offset=args[:scale_offset])
-    out_small = full_sequence(z1, patch_t)
-    out = sample_patch(out_small, a1, sampling_grid)
-    push!(z1s, cpu(z1))
-    for t = 2:args[:seqlen]
-        z1, a1, x̂, patch_t = forward_pass(z1, a1, models, x; scale_offset=args[:scale_offset])
-        out_small = full_sequence(z1, patch_t)
-        out += sample_patch(out_small, a1, sampling_grid)
-        push!(z1s, cpu(z1))
-    end
-    push!(z2s, cpu(μ))
-    return z2s, z1s
-end
-
-z2s, z1s = all_zs(x)
-
-begin
-    z2, z1 = [], []
-    for x in test_loader
-        z2s, z1s = all_zs(x)
-        push!(z2, hcat(z2s...))
-        push!(z1, hcat(z1s...))
+    log_value(lg, "learning_rate", opt.eta)
+    Ls = []
+    for epoch in 1:20
+        if epoch % 100 == 0
+            opt.eta = max(0.67 * opt.eta, 1e-7)
+            log_value(lg, "learning_rate", opt.eta)
+        end
+        ls = train_model(opt, ps, train_loader; epoch=epoch, logger=lg)
+        inds = sample(1:args[:bsz], 6, replace=false)
+        p = plot_recs(sample_loader(test_loader), inds)
+        display(p)
+        log_image(lg, "recs_$(epoch)", p)
+        L = test_model(test_loader)
+        log_value(lg, "test_loss", L)
+        @info "Test loss: $L"
+        if epoch % 100 == 0
+            save_model((Hx, Ha, Encoder), joinpath(save_folder, alias, savename(args) * "_$(epoch)eps"))
+        end
     end
 end
-
-z2ss = hcat(z2...)
-
-z1ss = hcat(z1...)
-
-zz = hcat(z2ss, z1ss)
-
-using TSne
-Y = tsne(zz')
-
-scatter(Y[:, 1], Y[:, 2])

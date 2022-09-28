@@ -133,7 +133,7 @@ end
 
 function map_to_rgb(a, b, c, d)
     rgb_arrays = [zeros(3, 28, 28) for _ = 1:4]
-    rgb_arrays[3][1, :, :] .= reshape(a, 28, 28)'
+    rgb_arrays[3][1, :, :] .= reshape(a .+ 0.2f0, 28, 28)'
     rgb_arrays[2][2, :, :] .= reshape(b, 28, 28)'
     rgb_arrays[1][3, :, :] .= reshape(c, 28, 28)'
 
@@ -149,7 +149,7 @@ function get_digit_parts(
     batchind;
     savestring=nothing,
     format_=".png",
-    resize_=(56, 56)
+    resize_=(80, 80)
 )
     patches, sub_patches, xys, xys1 = get_loop_patches(xs) |> gpu
     pasted_patches =

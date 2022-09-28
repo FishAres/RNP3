@@ -316,8 +316,25 @@ begin
         end
     end
 end
-# plot(log.(vcat(Ls...)))
+## =====
+include(srcdir("fancy_plotting_utils.jl"))
+ind = 0
 
+x = sample_loader(test_loader)
+img_ind = 6
+begin
+    # ind = mod(ind + 1, args[:bsz]) + 1
+    # ind = 37
+    digits, digit_patches, digit_im, patch_ims, xys, xys1 = get_digit_parts(x, ind)
+    p1 = plot_digit(cpu(x)[:, :, ind])
+    p2 = plot(digit_im, axis=nothing)
+    savefig(p1, "plots/transfer/omniglot_eg$(img_ind)_orig.png")
+    savefig(p2, "plots/transfer/omniglot_eg$(img_ind)_rec.png")
+    plot(p1, p2)
+end
+x
+
+ind
 
 # ## +==== sampling
 

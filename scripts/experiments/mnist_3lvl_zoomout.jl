@@ -311,8 +311,8 @@ lg = new_logger(joinpath(save_folder, alias), args)
 log_value(lg, "learning_rate", opt.eta)
 ## ====
 begin
-    Ls = []
-    for epoch in 1:200
+    # Ls = []
+    for epoch in 25:200
         if epoch % 50 == 0
             opt.eta = 0.67 * opt.eta
             log_value(lg, "learning_rate", opt.eta)
@@ -327,7 +327,7 @@ begin
         log_value(lg, "test_loss", L)
         @info "Test loss: $L"
         push!(Ls, ls)
-        if epoch % 50 == 0
+        if epoch % 25 == 0
             save_model((Hx, Ha, Encoder), joinpath(save_folder, alias, savename(args) * "_$(epoch)eps"))
         end
     end
@@ -335,3 +335,4 @@ end
 
 
 ## ======
+
