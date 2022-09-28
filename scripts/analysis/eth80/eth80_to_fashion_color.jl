@@ -29,7 +29,7 @@ args = Dict(
 args[:imszprod] = prod(args[:img_size])
 ## =====
 
-device!(2)
+device!(1)
 
 dev = gpu
 ## =====
@@ -40,13 +40,31 @@ train_data = imresize(train_data, args[:img_size])
 test_data = imresize(test_data, args[:img_size])
 
 train_data = unsqueeze(train_data, 3)
-train_data = cat(train_data, train_data, train_data, dims=3)
-
 test_data = unsqueeze(test_data, 3)
-test_data = cat(test_data, test_data, test_data, dims=3)
+begin
+    color_train_data = zeros(Float32, size(train_data)[1:2]..., 3, size(train_data)[end])
+    Threads.@threads for i in 1:size(train_data)[end]
+        x_ = train_data[:, :, :, i]
+        a = rand(Float32, 3)
+        a = 1.4f0 * a / sum(a)
+        r, g, b = a
+        color_train_data[:, :, :, i] = cat(r * x_, g * x_, b * x_, dims=3)
+    end
+end
 
-train_loader = DataLoader(train_data |> dev, batchsize=args[:bsz], shuffle=true, partial=false)
-test_loader = DataLoader(test_data |> dev, batchsize=args[:bsz], shuffle=true, partial=false)
+begin
+    color_test_data = zeros(Float32, size(test_data)[1:2]..., 3, size(test_data)[end])
+    Threads.@threads for i in 1:size(test_data)[end]
+        x_ = test_data[:, :, :, i]
+        a = rand(Float32, 3)
+        a = 1.4f0 * a / sum(a)
+        r, g, b = a
+        color_test_data[:, :, :, i] = cat(r * x_, g * x_, b * x_, dims=3)
+    end
+end
+
+train_loader = DataLoader(color_train_data |> dev, batchsize=args[:bsz], shuffle=true, partial=false)
+test_loader = DataLoader(color_test_data |> dev, batchsize=args[:bsz], shuffle=true, partial=false)
 x = first(test_loader)
 ## =====
 dev = has_cuda() ? gpu : cpu
@@ -281,7 +299,7 @@ args[:λpatch] = 0.0f0
 args[:λ] = 1.0f-5
 
 args[:α] = 1.0f0
-args[:β] = 0.2f0
+args[:β] = 0.3f0
 
 args[:η] = 4e-5
 opt = ADAM(args[:η])
@@ -292,8 +310,8 @@ lg = new_logger(joinpath(save_folder, alias), args)
 begin
     log_value(lg, "learning_rate", opt.eta)
     Ls = []
-    for epoch in 1:200
-        if epoch % 40 == 0
+    for epoch in 1:100
+        if epoch % 25 == 0
             opt.eta = max(0.67 * opt.eta, 1e-7)
             log_value(lg, "learning_rate", opt.eta)
         end
@@ -310,13 +328,3 @@ begin
         end
     end
 end
-
-# save_model((Hx, Ha, Encoder), joinpath(save_folder, alias, savename(args) * "_12eps"))
-
-# ## =====
-# x
-# full_recs, patches, xys, patches_t = get_loop(x)
-
-# a = full_recs[end]
-
-# imview_cifar(permutedims(a[:, :, :, 1], (2, 1, 3)))

@@ -29,7 +29,7 @@ args = Dict(
 args[:imszprod] = prod(args[:img_size])
 ## =====
 
-device!(2)
+device!(0)
 
 dev = gpu
 ## =====
@@ -40,13 +40,31 @@ train_data = imresize(train_data, args[:img_size])
 test_data = imresize(test_data, args[:img_size])
 
 train_data = unsqueeze(train_data, 3)
-train_data = cat(train_data, train_data, train_data, dims=3)
-
 test_data = unsqueeze(test_data, 3)
-test_data = cat(test_data, test_data, test_data, dims=3)
+begin
+    color_train_data = zeros(Float32, size(train_data)[1:2]..., 3, size(train_data)[end])
+    Threads.@threads for i in 1:size(train_data)[end]
+        x_ = train_data[:, :, :, i]
+        a = rand(Float32, 3)
+        a = 1.4f0 * a / sum(a)
+        r, g, b = a
+        color_train_data[:, :, :, i] = cat(r * x_, g * x_, b * x_, dims=3)
+    end
+end
 
-train_loader = DataLoader(train_data |> dev, batchsize=args[:bsz], shuffle=true, partial=false)
-test_loader = DataLoader(test_data |> dev, batchsize=args[:bsz], shuffle=true, partial=false)
+begin
+    color_test_data = zeros(Float32, size(test_data)[1:2]..., 3, size(test_data)[end])
+    Threads.@threads for i in 1:size(test_data)[end]
+        x_ = test_data[:, :, :, i]
+        a = rand(Float32, 3)
+        a = 1.4f0 * a / sum(a)
+        r, g, b = a
+        color_test_data[:, :, :, i] = cat(r * x_, g * x_, b * x_, dims=3)
+    end
+end
+
+train_loader = DataLoader(color_train_data |> dev, batchsize=args[:bsz], shuffle=true, partial=false)
+test_loader = DataLoader(color_test_data |> dev, batchsize=args[:bsz], shuffle=true, partial=false)
 x = first(test_loader)
 ## =====
 dev = has_cuda() ? gpu : cpu
@@ -175,7 +193,17 @@ function model_loss(x, r; args=args)
 end
 
 ## ======
-# todo don't bind RNN size to args[:π]
+
+args[:seqlen] = 4
+args[:scale_offset] = 2.0f0
+
+# args[:λpatch] = 0.001f0
+args[:λpatch] = 0.0f0
+args[:λ] = 1.0f-5
+
+args[:α] = 1.0f0
+args[:β] = 0.3f0
+
 args[:π] = 256
 args[:depth_Hx] = 6
 args[:D] = Normal(0.0f0, 1.0f0)
@@ -202,60 +230,11 @@ Ha_bounds = [l_enc_za_a; l_fa; l_dec_a]
 
 ## ======
 
-modelpath = "saved_models/gen_2lvl/2lvl_double_H_eth80_50x50_vae_v01_conv_dec_denseH/add_offset=true_asz=6_bsz=64_depth_Hx=6_esz=32_glimpse_len=4_img_channels=3_imszprod=2500_scale_offset=2.0_scale_offset_sense=3.2_seqlen=4_α=1.0_β=0.2_δL=0.25_η=4e-5_λ=1e-5_λf=0.167_λpatch=0.0_π=256_500eps.bson"
+# modelpath = "saved_models/gen_2lvl/2lvl_double_H_eth80_50x50_vae_v01_conv_dec_denseH/add_offset=true_asz=6_bsz=64_depth_Hx=6_esz=32_glimpse_len=4_img_channels=3_imszprod=2500_scale_offset=2.0_scale_offset_sense=3.2_seqlen=4_α=1.0_β=0.2_δL=0.25_η=4e-5_λ=1e-5_λf=0.167_λpatch=0.0_π=256_500eps.bson"
+
+modelpath = "saved_models/gen_2lvl/eth80_50x50_to_fashion_v0/add_offset=true_asz=6_bsz=64_depth_Hx=6_esz=32_glimpse_len=4_img_channels=3_imszprod=2500_scale_offset=2.0_scale_offset_sense=3.2_seqlen=4_α=1.0_β=0.3_δL=0.25_η=4e-5_λ=1e-5_λf=0.167_λpatch=0.0_π=256_60eps.bson"
 
 Hx, Ha, Encoder = load(modelpath)[:model] |> gpu
-
-
-Ha = Chain(
-    LayerNorm(args[:π],),
-    Dense(args[:π], 64),
-    LayerNorm(64, elu),
-    Dense(64, 64),
-    LayerNorm(64, elu),
-    Dense(64, sum(Ha_bounds) + args[:asz], bias=false),
-) |> gpu
-
-
-Encoder = let
-    enc1 = Chain(
-        x -> reshape(x, args[:img_size]..., args[:img_channels], :),
-        Conv((5, 5), args[:img_channels] => 32),
-        BatchNorm(32, relu),
-        Conv((5, 5), 32 => 32),
-        BatchNorm(32, relu),
-        Conv((5, 5), 32 => 32),
-        BatchNorm(32, relu),
-        Conv((5, 5), 32 => 32),
-        BatchNorm(32, relu),
-        BasicBlock(32 => 32, +),
-        BasicBlock(32 => 32, +),
-        BasicBlock(32 => 32, +),
-        BasicBlock(32 => 32, +),
-        BasicBlock(32 => 32, +),
-        BasicBlock(32 => 32, +),
-        BasicBlock(32 => 32, +),
-        BasicBlock(32 => 32, +),
-        flatten,
-    )
-    outsz = Flux.outputsize(enc1, (args[:img_size]..., args[:img_channels], args[:bsz]))
-    Chain(
-        enc1,
-        Dense(outsz[1], 64,),
-        LayerNorm(64, elu),
-        Dense(64, 64,),
-        LayerNorm(64, elu),
-        Dense(64, 64,),
-        LayerNorm(64, elu),
-        Dense(64, 64,),
-        LayerNorm(64, elu),
-        Split(
-            Dense(64, args[:π]),
-            Dense(64, args[:π])
-        )
-    )
-end |> gpu
-ps = Flux.params(Ha, Encoder)
 
 ## =====
 
@@ -272,51 +251,37 @@ alias = "eth80_50x50_to_fashion_v0"
 save_dir = get_save_dir(save_folder, alias)
 
 ## =====
-# todo - separate sensing network?
-args[:seqlen] = 4
-args[:scale_offset] = 2.0f0
 
-# args[:λpatch] = 0.001f0
-args[:λpatch] = 0.0f0
-args[:λ] = 1.0f-5
+out_ = reshape(cpu(out), args[:img_size]..., 3, :)
+x_ = reshape(cpu(x), args[:img_size]..., 3, size(x)[end])
+p1 = plot(imview_cifar(out_[:, :, :, ind]), axis=nothing,)
+p2 = plot(imview_cifar(x_[:, :, :, ind]), axis=nothing, size=(20, 20))
+p3 = plot([plot(imview_cifar(x[:, :, :, ind]), axis=nothing) for x in xs]...)
 
-args[:α] = 1.0f0
-args[:β] = 0.2f0
 
-args[:η] = 4e-5
-opt = ADAM(args[:η])
-lg = new_logger(joinpath(save_folder, alias), args)
-# todo try sinusoidal lr schedule
 
-## ====
+
+
+
+
+p = plot_seq ? let
+    patches_ = map(x -> reshape(x, args[:img_size]..., args[:img_channels], size(x)[end]), patches)
+    [plot_rec_cifar(x, full_recs[end], patches_, ind) for ind in inds]
+end : [plot_rec_cifar(full_recs[end], x, ind) for ind in inds]
+
+
+
+full_recs[end]
+ind = 0
+
+ind = ind - 1
+
+x = sample_loader(test_loader)
+full_recs, patches, xys, patches_t = get_loop(x)
 begin
-    log_value(lg, "learning_rate", opt.eta)
-    Ls = []
-    for epoch in 1:200
-        if epoch % 40 == 0
-            opt.eta = max(0.67 * opt.eta, 1e-7)
-            log_value(lg, "learning_rate", opt.eta)
-        end
-        ls = train_model(opt, ps, train_loader; epoch=epoch, logger=lg)
-        inds = sample(1:args[:bsz], 6, replace=false)
-        p = plot_recs(sample_loader(test_loader), inds)
-        display(p)
-        log_image(lg, "recs_$(epoch)", p)
-        L = test_model(test_loader)
-        log_value(lg, "test_loss", L)
-        @info "Test loss: $L"
-        if epoch % 10 == 0
-            save_model((Hx, Ha, Encoder), joinpath(save_folder, alias, savename(args) * "_$(epoch)eps"))
-        end
-    end
+    ind = mod(ind + 1, args[:bsz]) + 1
+
+    p = imresize(imview_cifar(full_recs[end][:, :, :, ind]), (100, 100))
 end
 
-# save_model((Hx, Ha, Encoder), joinpath(save_folder, alias, savename(args) * "_12eps"))
-
-# ## =====
-# x
-# full_recs, patches, xys, patches_t = get_loop(x)
-
-# a = full_recs[end]
-
-# imview_cifar(permutedims(a[:, :, :, 1], (2, 1, 3)))
+save("plots/reconstructions/paper_reconstructions/eth80_to_fashion/bag2.png", map(clamp01nan, p))
