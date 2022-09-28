@@ -253,13 +253,12 @@ function plot_sample(z; n=nothing, resize=true)
 end
 
 begin
+
     z = rand(args[:D], args[:π], args[:bsz]) |> gpu
-    p = plot(plot_sample(z; n=5), axis=nothing)
+    p = plot_sample(z; n=4)
 end
 
-p = plot(plot_sample(z; n=5), axis=nothing)
-
-savefig(p, "plots/sampling/eth80/sampling_3.png")
+save("plots/sampling/eth80/sampling_5.png", map(clamp01nan, p))
 
 ## ====== reconstructions
 
