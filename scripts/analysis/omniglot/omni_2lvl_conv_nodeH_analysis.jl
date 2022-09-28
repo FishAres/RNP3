@@ -26,7 +26,7 @@ args[:imzprod] = prod(args[:img_size])
 
 ## =====
 
-device!(0)
+device!(1)
 
 dev = gpu
 
@@ -253,8 +253,19 @@ Encoder_new = Encoder = let
         )
     )
 end |> gpu
+
+# Ha = Chain(
+#     LayerNorm(args[:π],),
+#     Dense(args[:π], 64),
+#     LayerNorm(64, elu),
+#     Dense(64, 64),
+#     LayerNorm(64, elu),
+#     Dense(64, sum(Ha_bounds) + args[:asz], bias=false),
+# ) |> gpu
+
 ps = Flux.params(Encoder)
 ## ======
+
 
 
 ## ======
@@ -271,7 +282,7 @@ end
 ## =====
 
 save_folder = "gen_2lvl_analysis"
-alias = "omni_2lvl_conv_node_H_v0_analysis"
+alias = "omni_2lvl_conv_node_H_v0_transfer_enc"
 save_dir = get_save_dir(save_folder, alias)
 
 ## =====
@@ -283,8 +294,12 @@ log_value(lg, "learning_rate", opt.eta)
 ## ====
 begin
     Ls = []
-    for epoch in 1:20
-        ls = train_model(opt, ps, train_loader; epoch=epoch, logger=lg)
+    for epoch in 1:400
+        if epoch % 50 == 0
+            opt.eta = 0.67 * opt.eta
+            log_value(lg, "learning_rate", opt.eta)
+        end
+        ls = train_model(opt, ps, test_loader; epoch=epoch, logger=lg)
         inds = sample(1:args[:bsz], 6, replace=false)
         p = plot_recs(sample_loader(test_loader), inds)
         p2 = plot_recs(sample_loader(val_loader), inds)
@@ -292,19 +307,98 @@ begin
         display(p3)
         log_image(lg, "recs_$(epoch)", p3)
 
-        Lval = test_model(val_loader)
+        @time Lval = test_model(test_loader)
         log_value(lg, "val_loss", Lval)
         @info "Val loss: $Lval"
-        if epoch % 10 == 0
-            @time Ltest = test_model(test_loader)
-            log_value(lg, "test_loss", Ltest)
-            @info "Test loss: $Ltest"
-        end
-
         push!(Ls, ls)
         if epoch % 50 == 0
             save_model((Hx, Ha, Encoder), joinpath(save_folder, alias, savename(args) * "_$(epoch)eps"))
         end
     end
 end
+# plot(log.(vcat(Ls...)))
 
+
+# ## +==== sampling
+
+# function get_outputs(z)
+#     θsz = Hx(z)
+#     θsa = Ha(z)
+#     models, z0, a0 = get_models(θsz, θsa; args=args)
+#     z1, a1, x̂, patch_t = forward_pass(z0, a0, models, x; scale_offset=args[:scale_offset])
+#     out_small = full_sequence(z1, patch_t)
+#     out = sample_patch(out_small, a1, sampling_grid)
+#     for t = 2:args[:seqlen]
+#         z1, a1, x̂, patch_t = forward_pass(z1, a1, models, x; scale_offset=args[:scale_offset])
+#         out_small = full_sequence(z1, patch_t)
+#         out += sample_patch(out_small, a1, sampling_grid)
+#         push!(z1s, cpu(z1))
+#     end
+#     return out
+# end
+
+
+# function plot_sample(z; n=nothing)
+#     bsz = size(z)[end]
+#     n = n === nothing ? trunc(Int, sqrt(bsz)) : n
+#     n_samples = n^2
+#     out = dropdims(get_outputs(z) |> cpu, dims=3)[:, :, 1:n_samples]
+#     a = partition(collect(eachslice(out, dims=3)), n)
+#     b = map(x -> vcat(x...), a)
+#     c = hcat(b...)
+#     plot_digit(c)
+# end
+
+# begin
+#     z = rand(args[:D], args[:π], args[:bsz]) |> gpu
+#     plot_sample(z; n=5)
+# end
+
+# ## === clustering
+# function all_zs(x)
+#     z1s, z2s = [], []
+#     μ, logvar = Encoder(x)
+#     θsz = Hx(μ)
+#     θsa = Ha(μ)
+#     models, z0, a0 = get_models(θsz, θsa; args=args)
+#     z1, a1, x̂, patch_t = forward_pass(z0, a0, models, x; scale_offset=args[:scale_offset])
+#     out_small = full_sequence(z1, patch_t)
+#     out = sample_patch(out_small, a1, sampling_grid)
+#     push!(z1s, cpu(z1))
+#     for t = 2:args[:seqlen]
+#         z1, a1, x̂, patch_t = forward_pass(z1, a1, models, x; scale_offset=args[:scale_offset])
+#         out_small = full_sequence(z1, patch_t)
+#         out += sample_patch(out_small, a1, sampling_grid)
+#         push!(z1s, cpu(z1))
+#     end
+#     push!(z2s, cpu(μ))
+#     return z2s, z1s
+# end
+
+# x = first(test_loader)
+# z2s, z1s = all_zs(x)
+
+# hcat(z2s...)
+
+# begin
+#     z2, z1 = [], []
+#     for x in test_loader
+#         z2s, z1s = all_zs(x)
+#         push!(z2, hcat(z2s...))
+#         push!(z1, hcat(z1s...))
+#     end
+# end
+
+# n_samples = 3000
+# z2ss = hcat(z2...)
+# z2ss = z2ss[:, 1:n_samples]
+
+# z1ss = hcat(z1...)
+# z1ss = z1ss[:, 1:n_samples]
+
+# zz = hcat(z2ss, z1ss)
+
+# using TSne
+# Y = tsne(z2ss')
+
+# scatter(Y[:, 1], Y[:, 2])

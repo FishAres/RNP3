@@ -26,7 +26,7 @@ args[:imzprod] = prod(args[:img_size])
 
 ## =====
 
-device!(0)
+device!(1)
 
 dev = gpu
 
@@ -294,7 +294,7 @@ save_dir = get_save_dir(save_folder, alias)
 
 ## =====
 args[:seqlen] = 4
-args[:scale_offset] = 2.0f0
+args[:scale_offset] = 1.6f0
 
 # args[:λpatch] = Float32(1 / 3args[:seqlen])
 # args[:λpatch] = 1.0f-4

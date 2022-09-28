@@ -32,56 +32,79 @@ device!(0)
 dev = gpu
 
 ## =====
-function mnist_quadrants(xs; args=args)
-    tmp = collect(partition(eachslice(xs, dims=3), 4))
-    a = map(x -> vcat(x[1:2]...), tmp)
-    b = map(x -> vcat(x[3:4]...), tmp)
-    c = map(x -> hcat(x...), zip(a, b))
-    resized_vec = map(x -> imresize(x, args[:img_size]), c)
-    # return fast_img_concat(resized_vec)
+
+function get_rand_thetas(args; blims=0.1f0)
+    thetas = zeros(Float32, 6, args[:bsz])
+    # thetas[[1, 4], :] .= -2.0f0
+    thetas[[1, 4], :] .= -3.0f0
+    thetas[5:6, :] .= rand(Uniform(-blims, blims), 2, args[:bsz])
+    thetas[2, :] .= 2.0f0 * π32 .* rand(Uniform(-1.0f0, 1.0f0), args[:bsz])
+    thetas[3, :] .= rand(Uniform(-0.5f0, 0.5f0), args[:bsz])
+    return thetas
 end
 
-function fast_img_concat(xs; args=args)
-    cat_ims = zeros(Float32, args[:img_size]..., length(xs))
-    Threads.@threads for i in 1:length(xs)
-        cat_ims[:, :, i] = xs[i]
+
+function get_quad_mnist(x::Tuple{Array{Float32,4},Array{Float32,4}})
+    zero_canv = zeros(Float32, args[:img_size]..., 1, args[:bsz])
+    canv = [zero_canv for _ in 1:4]
+    canvas = cat(canv..., dims=3)
+    for batch in 1:args[:bsz]
+        quads = sample(1:4, 2, replace=false)
+        for (i, j) in enumerate(quads)
+            canvas[:, :, j, batch] = x[i][:, :, 1, batch]
+        end
     end
-    return cat_ims
+    canvas
 end
 
-function gen_mnist_quad_data_mixed(args)
+function squish_quads(x)
+    a = collect(eachslice(x, dims=3))
+    b = vcat(a[1], a[2])
+    c = vcat(a[3], a[4])
+    d = hcat(b, c)
+    return unsqueeze(imresize(d, args[:img_size]), 3)
+end
+
+function gen_quad_data(xs; n_samples=100)
+    xout = []
+    for n in 1:n_samples
+        x1, x2 = rand(xs, 2)
+        a1, a2 = [get_rand_thetas(args) for _ in 1:2]
+        x1 = sample_patch(gpu(x1), gpu(a1), sampling_grid) |> cpu
+        x2 = sample_patch(gpu(x2), gpu(a2), sampling_grid) |> cpu
+        push!(xout, get_quad_mnist((x1, x2)) |> squish_quads)
+    end
+    xout
+end
+
+
+function fast_concat(xs; args=args)
+    xout = zeros(Float32, args[:img_size]..., 1, args[:bsz] * length(xs))
+    Threads.@threads for i in 1:length(xs)
+        xout[:, :, 1, (i-1)*args[:bsz]+1:i*args[:bsz]] = xs[i]
+    end
+    return xout
+end
+
+function prep_mnist_quads(args; ntrain=2000, ntest=200)
+
     train_digits, train_labels = MNIST(split=:train)[:]
     test_digits, test_labels = MNIST(split=:test)[:]
-    train_ims = mnist_quadrants(train_digits)
-    test_ims = mnist_quadrants(test_digits)
-    train_digit_vec = collect(eachslice(train_digits, dims=3))
-    test_digit_vec = collect(eachslice(test_digits, dims=3))
 
-    train_data = fast_img_concat(shuffle([train_ims; train_digit_vec]))
-    test_data = fast_img_concat(shuffle([test_ims; test_digit_vec]))
+    train_vec = collect(eachslice(train_digits, dims=3))
+    test_vec = collect(eachslice(test_digits, dims=3))
+    train_batches = unsqueeze.(batch.(shuffle(collect(partition(train_vec, args[:bsz])))), 3)
+    test_batches = unsqueeze.(batch.(shuffle(collect(partition(test_vec, args[:bsz])))), 3)
 
-    return train_data, test_data
-
-end
-
-function shuffle_concat_mnist(digits)
-    train_digit_vec = shuffle(collect(eachslice(digits, dims=3)))
-    fast_img_concat(train_digit_vec)
-end
-
-function gen_mnist_quad_data(args; n_repeats=3)
-    train_digits, train_labels = MNIST(split=:train)[:]
-    test_digits, test_labels = MNIST(split=:test)[:]
-    train_ims = [mnist_quadrants(shuffle_concat_mnist(train_digits)) for _ in 1:n_repeats]
-    test_ims = [mnist_quadrants(shuffle_concat_mnist(test_digits)) for _ in 1:n_repeats]
-
-    train_data = fast_img_concat(vcat(train_ims...))
-    test_data = fast_img_concat(vcat(test_ims...))
+    train_data = fast_concat(gen_quad_data(train_batches; n_samples=ntrain))
+    test_data = fast_concat(gen_quad_data(test_batches; n_samples=ntest))
 
     return train_data, test_data
 end
 
-train_data, test_data = gen_mnist_quad_data(args)
+## ====
+
+train_data, test_data = prep_mnist_quads(args; ntrain=2000, ntest=200)
 
 train_loader = DataLoader((train_data |> dev), batchsize=args[:bsz], shuffle=true, partial=false)
 test_loader = DataLoader((test_data |> dev), batchsize=args[:bsz], shuffle=true, partial=false)
@@ -106,8 +129,8 @@ function get_fpolicy_models(θs, Ha_bounds; args=args)
     end
     Θ = [θs[inds[i]+1:inds[i+1], :] for i in 1:length(inds)-1]
 
-    Enc_za_a = Chain(HyDense(args[:π] + args[:asz], args[:π], Θ[1], sin), flatten)
-    f_policy = ps_to_RN(get_rn_θs(Θ[2], args[:π], args[:π]); f_out=sin)
+    Enc_za_a = Chain(HyDense(args[:π] + args[:asz], args[:π], Θ[1], elu), flatten)
+    f_policy = ps_to_RN(get_rn_θs(Θ[2], args[:π], args[:π]); f_out=elu)
     Dec_z_a = Chain(HyDense(args[:π], args[:asz], Θ[3], sin), flatten)
 
     a0 = sin.(Θ[4])
@@ -209,12 +232,16 @@ Hx = Chain(
     LayerNorm(64, elu),
     Dense(64, 64),
     LayerNorm(64, elu),
+    Dense(64, 64),
+    LayerNorm(64, elu),
     Dense(64, sum(Hx_bounds) + args[:π], bias=false),
 ) |> gpu
 
 Ha = Chain(
     LayerNorm(args[:π],),
     Dense(args[:π], 64),
+    LayerNorm(64, elu),
+    Dense(64, 64),
     LayerNorm(64, elu),
     Dense(64, 64),
     LayerNorm(64, elu),
@@ -261,18 +288,17 @@ p = plot_recs(sample_loader(test_loader), inds)
 ## =====
 
 save_folder = "gen_3lvl"
-alias = "double_H_mnist_full_quad_generative_v0"
+alias = "double_H_mnist_noisy_2quad_generative_v0"
 save_dir = get_save_dir(save_folder, alias)
 
 ## =====
 # todo - separate sensing network?
-args[:seqlen] = 4
-args[:scale_offset] = 2.0f0
+args[:seqlen] = 2
+args[:scale_offset] = 1.5f0
 
 # args[:λpatch] = Float32(1 / 2 * args[:seqlen])
 args[:λpatch] = 0.0f0
-args[:λf] = 1.0f0
-args[:λ] = 0.001f0
+args[:λ] = 0.0001f0
 args[:D] = Normal(0.0f0, 1.0f0)
 
 args[:α] = 2.0f0

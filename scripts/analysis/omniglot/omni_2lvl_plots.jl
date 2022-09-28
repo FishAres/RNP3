@@ -26,7 +26,7 @@ args[:imzprod] = prod(args[:img_size])
 
 ## =====
 
-device!(2)
+device!(0)
 
 dev = gpu
 
@@ -75,7 +75,9 @@ function get_param_sizes(model)
         if hasproperty(m, :weight)
             wprod = prod(size(m.weight)[1:end-1])
             if hasproperty(m, :bias)
-                wprod += size(m.bias)[1]
+                if m.bias == true
+                    wprod += size(m.bias)[1]
+                end
             end
             push!(nw, wprod)
         end
@@ -150,11 +152,24 @@ end
 
 
 ## ====== model
+using DiffEqFlux, DifferentialEquations
 
 # todo don't bind RNN size to args[:π]
 args[:π] = 64
 args[:D] = Normal(0.0f0, 1.0f0)
-args[:norm_groups] = 8 # no. of groups for groupnorm
+args[:norm_groups] = 8
+args[:seqlen] = 4
+args[:scale_offset] = 2.0f0
+
+# args[:λpatch] = Float32(1 / 3args[:seqlen])
+# args[:λpatch] = 1.0f-4
+args[:λpatch] = 0.0f0
+args[:λ] = 1.0f-6
+args[:D] = Normal(0.0f0, 1.0f0)
+
+args[:α] = 1.0f0
+args[:β] = 0.05f0
+
 
 l_enc_za_z = (args[:π] + args[:asz]) * args[:π] # encoder (z_t, a_t) -> z_t+1
 l_fx = get_rnn_θ_sizes(args[:π], args[:π]) # μ, logvar
@@ -181,166 +196,80 @@ l_dec_a = args[:asz] * args[:π] + args[:asz] # decoder z -> a, with bias
 
 Ha_bounds = [l_enc_za_a; l_fa; l_dec_a]
 
-# Hx = Chain(
-#     LayerNorm(args[:π],),
-#     Dense(args[:π], 64),
-#     LayerNorm(64, elu),
-#     Dense(64, 64),
-#     LayerNorm(64, elu),
-#     Dense(64, 256),
-#     LayerNorm(256, elu),
-#     x -> reshape(x, 8, 8, 4, :),
-#     ConvTranspose((4, 4), 4 => 16, stride=(2, 2), pad=(1, 1)),
-#     GroupNorm(16, 4, elu),
-#     ConvTranspose((4, 4), 16 => 16, stride=(2, 2), pad=(2, 2)),
-#     GroupNorm(16, 4, elu),
-#     ConvTranspose((4, 4), 16 => 16, stride=(2, 2), pad=(2, 2)),
-#     GroupNorm(16, 4, elu),
-#     ConvTranspose((4, 4), 16 => 8, stride=(2, 2), pad=(2, 2), bias=false),
-#     flatten,
-# ) |> gpu
+modelpath = "saved_models/gen_2lvl/omni_2lvl_conv_node_H_v0/add_offset=true_asz=6_bsz=64_esz=32_glimpse_len=4_img_channels=1_imzprod=784_norm_groups=8_scale_offset=2.0_scale_offset_sense=3.2_seqlen=4_α=1.0_β=0.05_η=0.0001_λ=1e-6_λf=0.167_λpatch=0.0_π=64_100eps.bson"
 
-Hx = Chain(
-    LayerNorm(args[:π],),
-    Dense(args[:π], 64),
-    LayerNorm(64, elu),
-    Dense(64, 64),
-    LayerNorm(64, elu),
-    Dense(64, 512),
-    LayerNorm(512, elu),
-    x -> reshape(x, 8, 8, 8, :),
-    Conv((3, 3), 8 => 32, pad=(1, 1)),
-    GroupNorm(32, 16, elu),
-    BasicBlock(32 => 32, +),
-    BasicBlock(32 => 32, +),
-    ConvTranspose((4, 4), 32 => 32, stride=(2, 2), pad=(1, 1)),
-    GroupNorm(32, args[:norm_groups], elu),
-    ConvTranspose((4, 4), 32 => 32, stride=(2, 2), pad=(2, 2)),
-    GroupNorm(32, args[:norm_groups], elu),
-    ConvTranspose((4, 4), 32 => 16, stride=(2, 2), pad=(2, 2)),
-    GroupNorm(16, args[:norm_groups], elu),
-    ConvTranspose((4, 4), 16 => 8, stride=(2, 2), pad=(2, 2), bias=false),
-    flatten,
-) |> gpu
-
-for p in Flux.params(Hx)
-    p ./= 10.0f0
-end
-
-Ha = Chain(
-    LayerNorm(args[:π],),
-    Dense(args[:π], 64),
-    LayerNorm(64, elu),
-    Dense(64, 64),
-    LayerNorm(64, elu),
-    Dense(64, sum(Ha_bounds) + args[:asz], bias=false),
-) |> gpu
-
-
-Encoder = let
-    enc1 = Chain(
-        x -> reshape(x, args[:img_size]..., args[:img_channels], :),
-        Conv((5, 5), args[:img_channels] => 32),
-        BatchNorm(32, relu),
-        Conv((5, 5), 32 => 32),
-        BatchNorm(32, relu),
-        Conv((5, 5), 32 => 32),
-        BatchNorm(32, relu),
-        Conv((5, 5), 32 => 32),
-        BatchNorm(32, relu),
-        BasicBlock(32 => 32, +),
-        BasicBlock(32 => 32, +),
-        BasicBlock(32 => 32, +),
-        BasicBlock(32 => 32, +),
-        BasicBlock(32 => 32, +),
-        BasicBlock(32 => 32, +),
-        BasicBlock(32 => 32, +),
-        BasicBlock(32 => 32, +),
-        flatten,
-    )
-    outsz = Flux.outputsize(enc1, (args[:img_size]..., args[:img_channels], args[:bsz]))
-    Chain(
-        enc1,
-        Dense(outsz[1], 64,),
-        LayerNorm(64, elu),
-        Dense(64, 64,),
-        LayerNorm(64, elu),
-        Dense(64, 64,),
-        LayerNorm(64, elu),
-        Dense(64, 64,),
-        LayerNorm(64, elu),
-        Split(
-            Dense(64, args[:π]),
-            Dense(64, args[:π])
-        )
-    )
-end |> gpu
-ps = Flux.params(Hx, Ha, Encoder)
-
+Hx, Ha, Encoder = load(modelpath)[:model] |> gpu
 ## ======
-
-# z = randn(Float32, args[:π], args[:bsz]) |> gpu
-# a = Hx(z)
-# b = sum(Hx_bounds) + sum(Ha_bounds)
-# size(a, 1) / b
 
 let
     inds = sample(1:args[:bsz], 6, replace=false)
     p = plot_recs(sample_loader(test_loader), inds)
     display(p)
 end
-## =====
 
-save_folder = "gen_2lvl"
-alias = "omni_2lvl_convH_v01_reslayers_H"
-save_dir = get_save_dir(save_folder, alias)
+## ====== 
+include(srcdir("fancy_plotting_utils.jl"))
 
-## =====
-args[:seqlen] = 4
-args[:scale_offset] = 1.8f0
+x = first(test_loader)
 
-# args[:λpatch] = Float32(1 / 3args[:seqlen])
-args[:λpatch] = 1.0f-4
-args[:λ] = 1.0f-6
-args[:D] = Normal(0.0f0, 1.0f0)
+patches, sub_patches, xys, xys1 = get_loop_patches(x) |> gpu
+pasted_patches =
+    [sample_patch(patches[i], xys[i], sampling_grid) for i = 1:length(patches)] |> cpu
 
-args[:α] = 1.0f0
-args[:β] = 0.05f0
+digits = orange_on_rgb_array(pasted_patches)
+# digit_patches = [orange_on_rgb_array(map(x -> reshape(x, 28, 28, 1, 64), z)) for z in sub_patches]
+xys[1]
+digit_patches = [
+    orange_on_rgb_array([
+        sample_patch(sample_patch(sub_patch, xy, sampling_grid), xy2, sampling_grid) for
+        (sub_patch, xy, xy2) in zip(subpatch_vec, xy_vec, xys)
+    ]) for (subpatch_vec, xy_vec) in zip(sub_patches, xys1)
+] |> cpu
+
+digit_patches[1]
+
+patches_ = [
+    [
+        sample_patch(sub_patch, xy, sampling_grid) for
+        (sub_patch, xy) in zip(subpatch_vec, xy_vec)
+    ] for (subpatch_vec, xy_vec) in zip(sub_patches, xys1)
+]
+
+patches_[1][1]
+patches_[1]
+length(patches_)
 
 
-args[:η] = 1e-4
-opt = ADAM(args[:η])
-lg = new_logger(joinpath(save_folder, alias), args)
-log_value(lg, "learning_rate", opt.eta)
-## ====
+xys[1]
+a = orange_on_rgb_array([sample_patch(patches_[k][k], xys[1], sampling_grid) for k in 1:4] |> cpu)
+colorview(RGB, a[2])
+
+
+
+
+
+
+## ======
+digits, digit_patches, digit_im, patch_ims, xys, xys1 = get_digit_parts(x, 1)
+
+colorview(RGB, digits[1])
+
+digit_patches[1]
+
+ind = 0
+x = first(test_loader)
 begin
-    Ls = []
-    for epoch in 1:400
-        if epoch % 50 == 0
-            opt.eta = max(0.6 * opt.eta, 1e-7)
-            log_value(lg, "learning_rate", opt.eta)
-        end
-        ls = train_model(opt, ps, train_loader; epoch=epoch, logger=lg)
-        inds = sample(1:args[:bsz], 6, replace=false)
-        p = plot_recs(sample_loader(test_loader), inds)
-        p2 = plot_recs(sample_loader(val_loader), inds)
-        p3 = plot(p, p2, layout=(1, 2))
-        display(p3)
-        log_image(lg, "recs_$(epoch)", p3)
-
-        Lval = test_model(val_loader)
-        log_value(lg, "val_loss", Lval)
-        @info "Val loss: $Lval"
-        if epoch % 10 == 0
-            @time Ltest = test_model(test_loader)
-            log_value(lg, "test_loss", Ltest)
-            @info "Test loss: $Ltest"
-        end
-
-        push!(Ls, ls)
-        if epoch % 50 == 0
-            save_model((Hx, Ha, Encoder), joinpath(save_folder, alias, savename(args) * "_$(epoch)eps"))
-        end
-    end
+    # ind = mod(ind + 1, 64) + 1
+    println(ind)
+    digits, digit_patches, digit_im, patch_ims, xys, xys1 = get_digit_parts(x, ind;
+        savestring="plots/reconstructions/paper_reconstructions/parts_subparts/omniglot/omni_digit_01")
+    digit_im
 end
 
+
+begin
+    ind += 1
+    digits, digit_patches, digit_im, patch_ims, xys, xys1 = get_digit_parts(first(test_loader), ind)
+    digit_im
+end
+ind
