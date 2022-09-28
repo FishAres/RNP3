@@ -29,7 +29,7 @@ args = Dict(
 args[:imszprod] = prod(args[:img_size])
 ## =====
 
-device!(2)
+device!(0)
 
 dev = gpu
 ## =====
@@ -192,8 +192,7 @@ l_enc_za_a = (args[:π] + args[:asz]) * args[:π] # encoder (z_t, a_t) -> a_t+1
 l_fa = get_rnn_θ_sizes(args[:π], args[:π]) # same size for now
 l_dec_a = args[:asz] * args[:π] + args[:asz] # decoder z -> a, with bias
 
-
-
+Ha_bounds = [l_enc_za_a; l_fa; l_dec_a]
 ## ======
 
 modelpath = "saved_models/gen_2lvl/2lvl_double_H_eth80_50x50_vae_v01_conv_dec_denseH/add_offset=true_asz=6_bsz=64_depth_Hx=6_esz=32_glimpse_len=4_img_channels=3_imszprod=2500_scale_offset=2.0_scale_offset_sense=3.2_seqlen=4_α=1.0_β=0.2_δL=0.25_η=4e-5_λ=1e-5_λf=0.167_λpatch=0.0_π=256_500eps.bson"
@@ -261,9 +260,24 @@ end
 p = plot(plot_sample(z; n=5), axis=nothing)
 
 savefig(p, "plots/sampling/eth80/sampling_3.png")
-## ======
+
+## ====== reconstructions
 
 
+x = sample_loader(test_loader)
+full_recs, patches, xys, patches_t = get_loop(x)
+ind = 0
+begin
+    ind = mod(ind + 1, args[:bsz]) + 1
+    p = imresize(imview_cifar(full_recs[end][:, :, :, ind]), (100, 100))
+end
+ind_patches = [imview_cifar(patch[:, :, :, ind]) for patch in patches]
+px = imview_cifar(cpu(x)[:, :, :, ind])
+
+
+save("plots/reconstructions/paper_reconstructions/eth80/car0.png", map(clamp01nan, p))
+[save("plots/reconstructions/paper_reconstructions/eth80/car0_patches_$i.png", map(clamp01nan, p)) for (i, p) in enumerate(ind_patches)]
+save("plots/reconstructions/paper_reconstructions/eth80/car0_x.png", map(clamp01nan, px))
 
 
 ## === clustering

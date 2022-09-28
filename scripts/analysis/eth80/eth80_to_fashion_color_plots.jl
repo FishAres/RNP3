@@ -259,11 +259,6 @@ p2 = plot(imview_cifar(x_[:, :, :, ind]), axis=nothing, size=(20, 20))
 p3 = plot([plot(imview_cifar(x[:, :, :, ind]), axis=nothing) for x in xs]...)
 
 
-
-
-
-
-
 p = plot_seq ? let
     patches_ = map(x -> reshape(x, args[:img_size]..., args[:img_channels], size(x)[end]), patches)
     [plot_rec_cifar(x, full_recs[end], patches_, ind) for ind in inds]
@@ -284,4 +279,38 @@ begin
     p = imresize(imview_cifar(full_recs[end][:, :, :, ind]), (100, 100))
 end
 
-save("plots/reconstructions/paper_reconstructions/eth80_to_fashion/bag2.png", map(clamp01nan, p))
+# save("plots/reconstructions/paper_reconstructions/eth80_to_fashion/bag2.png", map(clamp01nan, p))
+
+## +=====
+
+function get_outputs(z)
+    θsz = Hx(z)
+    θsa = Ha(z)
+    models, z0, a0 = get_models(θsz, θsa; args=args)
+    z1, a1, x̂, patch_t = forward_pass(z0, a0, models, x; scale_offset=args[:scale_offset])
+    out_small = full_sequence(z1, patch_t)
+    out = sample_patch(out_small, a1, sampling_grid)
+    for t = 2:args[:seqlen]
+        z1, a1, x̂, patch_t = forward_pass(z1, a1, models, x; scale_offset=args[:scale_offset])
+        out_small = full_sequence(z1, patch_t)
+        out += sample_patch(out_small, a1, sampling_grid)
+    end
+    return out |> cpu
+end
+
+
+function plot_sample(z; n=nothing)
+    bsz = size(z)[end]
+    n = n === nothing ? trunc(Int, sqrt(bsz)) : n
+    n_samples = n^2
+    out = get_outputs(z)[:, :, :, 1:n_samples]
+    a = partition(collect(eachslice(out, dims=4)), n)
+    b = map(x -> vcat(x...), a)
+    c = hcat(b...)
+    imresize(imview_cifar(c), (500, 500))
+end
+
+begin
+    z = rand(args[:D], args[:π], args[:bsz]) |> gpu
+    plot_sample(z; n=5)
+end
