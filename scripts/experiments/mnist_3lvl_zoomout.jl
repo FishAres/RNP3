@@ -27,22 +27,11 @@ args[:imzprod] = prod(args[:img_size])
 
 ## =====
 
-device!(0)
+device!(2)
 
 dev = gpu
 
 ## =====
-
-function get_rand_thetas(args; blims=0.1f0)
-    thetas = zeros(Float32, 6, args[:bsz])
-    # thetas[[1, 4], :] .= -2.0f0
-    thetas[[1, 4], :] .= -3.0f0
-    thetas[5:6, :] .= rand(Uniform(-blims, blims), 2, args[:bsz])
-    thetas[2, :] .= 2.0f0 * π32 .* rand(Uniform(-1.0f0, 1.0f0), args[:bsz])
-    thetas[3, :] .= rand(Uniform(-0.5f0, 0.5f0), args[:bsz])
-    return thetas
-end
-
 
 function get_quad_mnist(x::Tuple{Array{Float32,4},Array{Float32,4}})
     zero_canv = zeros(Float32, args[:img_size]..., 1, args[:bsz])
@@ -77,7 +66,6 @@ function gen_quad_data(xs; n_samples=100)
     xout
 end
 
-
 function fast_concat(xs; args=args)
     xout = zeros(Float32, args[:img_size]..., 1, args[:bsz] * length(xs))
     Threads.@threads for i in 1:length(xs)
@@ -102,12 +90,6 @@ function prep_mnist_quads(args; ntrain=2000, ntest=200)
     return train_data, test_data
 end
 
-## ====
-
-train_data, test_data = prep_mnist_quads(args; ntrain=2000, ntest=200)
-
-train_loader = DataLoader((train_data |> dev), batchsize=args[:bsz], shuffle=true, partial=false)
-test_loader = DataLoader((test_data |> dev), batchsize=args[:bsz], shuffle=true, partial=false)
 
 
 ## =====
@@ -120,8 +102,24 @@ const zeros_vec = zeros(1, 1, args[:bsz]) |> dev
 diag_vec = [[1.0f0 0.0f0; 0.0f0 1.0f0] for _ in 1:args[:bsz]]
 const diag_mat = cat(diag_vec..., dims=3) |> dev
 const diag_off = cat(1.0f-6 .* diag_vec..., dims=3) |> dev
+
 ## =====
 
+function get_rand_thetas(args; blims=0.1f0)
+    thetas = zeros(Float32, 6, args[:bsz])
+    # thetas[[1, 4], :] .= -2.0f0
+    thetas[[1, 4], :] .= -3.0f0
+    thetas[5:6, :] .= rand(Uniform(-blims, blims), 2, args[:bsz])
+    thetas[2, :] .= 2.0f0 * π32 .* rand(Uniform(-1.0f0, 1.0f0), args[:bsz])
+    thetas[3, :] .= rand(Uniform(-0.5f0, 0.5f0), args[:bsz])
+    return thetas
+end
+train_data, test_data = prep_mnist_quads(args; ntrain=2500, ntest=200)
+
+train_loader = DataLoader((train_data |> dev), batchsize=args[:bsz], shuffle=true, partial=false)
+test_loader = DataLoader((test_data |> dev), batchsize=args[:bsz], shuffle=true, partial=false)
+
+## =====
 
 function get_fpolicy_models(θs, Ha_bounds; args=args)
     inds = Zygote.ignore() do
@@ -222,87 +220,89 @@ l_dec_a = args[:asz] * args[:π] + args[:asz] # decoder z -> a, with bias
 
 Ha_bounds = [l_enc_za_a; l_fa; l_dec_a]
 
-Hx = Chain(
-    LayerNorm(args[:π],),
-    Dense(args[:π], 64),
-    LayerNorm(64, elu),
-    Dense(64, 64),
-    LayerNorm(64, elu),
-    Dense(64, 64),
-    LayerNorm(64, elu),
-    Dense(64, 64),
-    LayerNorm(64, elu),
-    Dense(64, 64),
-    LayerNorm(64, elu),
-    Dense(64, sum(Hx_bounds) + args[:π], bias=false),
-) |> gpu
+# Hx = Chain(
+#     LayerNorm(args[:π],),
+#     Dense(args[:π], 64),
+#     LayerNorm(64, elu),
+#     Dense(64, 64),
+#     LayerNorm(64, elu),
+#     Dense(64, 64),
+#     LayerNorm(64, elu),
+#     Dense(64, 64),
+#     LayerNorm(64, elu),
+#     Dense(64, 64),
+#     LayerNorm(64, elu),
+#     Dense(64, 64),
+#     LayerNorm(64, elu),
+#     Dense(64, sum(Hx_bounds) + args[:π], bias=false),
+# ) |> gpu
 
-Ha = Chain(
-    LayerNorm(args[:π],),
-    Dense(args[:π], 64),
-    LayerNorm(64, elu),
-    Dense(64, 64),
-    LayerNorm(64, elu),
-    Dense(64, 64),
-    LayerNorm(64, elu),
-    Dense(64, sum(Ha_bounds) + args[:asz], bias=false),
-) |> gpu
+# Ha = Chain(
+#     LayerNorm(args[:π],),
+#     Dense(args[:π], 64),
+#     LayerNorm(64, elu),
+#     Dense(64, 64),
+#     LayerNorm(64, elu),
+#     Dense(64, 64),
+#     LayerNorm(64, elu),
+#     Dense(64, sum(Ha_bounds) + args[:asz], bias=false),
+# ) |> gpu
 
 
-Encoder = let
-    enc1 = Chain(
-        x -> reshape(x, 28, 28, 1, :),
-        Conv((5, 5), 1 => 32),
-        BatchNorm(32, relu),
-        Conv((5, 5), 32 => 32),
-        BatchNorm(32, relu),
-        BasicBlock(32 => 32, +),
-        BasicBlock(32 => 32, +),
-        BasicBlock(32 => 32, +),
-        BasicBlock(32 => 32, +),
-        BasicBlock(32 => 32, +),
-        flatten,
-    )
-    outsz = Flux.outputsize(enc1, (28, 28, 1, args[:bsz]))
-    Chain(
-        enc1,
-        Dense(outsz[1], 64,),
-        LayerNorm(64, elu),
-        Dense(64, 64,),
-        LayerNorm(64, elu),
-        Dense(64, 64,),
-        LayerNorm(64, elu),
-        Split(
-            Dense(64, args[:π]),
-            Dense(64, args[:π])
-        )
-    )
-end |> gpu
-ps = Flux.params(Hx, Ha, Encoder)
-
+# Encoder = let
+#     enc1 = Chain(
+#         x -> reshape(x, 28, 28, 1, :),
+#         Conv((5, 5), 1 => 32),
+#         BatchNorm(32, relu),
+#         Conv((5, 5), 32 => 32),
+#         BatchNorm(32, relu),
+#         BasicBlock(32 => 32, +),
+#         BasicBlock(32 => 32, +),
+#         BasicBlock(32 => 32, +),
+#         BasicBlock(32 => 32, +),
+#         BasicBlock(32 => 32, +),
+#         BasicBlock(32 => 32, +),
+#         flatten,
+#     )
+#     outsz = Flux.outputsize(enc1, (28, 28, 1, args[:bsz]))
+#     Chain(
+#         enc1,
+#         Dense(outsz[1], 64,),
+#         LayerNorm(64, elu),
+#         Dense(64, 64,),
+#         LayerNorm(64, elu),
+#         Dense(64, 64,),
+#         LayerNorm(64, elu),
+#         Split(
+#             Dense(64, args[:π]),
+#             Dense(64, args[:π])
+#         )
+#     )
+# end |> gpu
+# ps = Flux.params(Hx, Ha, Encoder)
 ## =====
 
-inds = sample(1:args[:bsz], 6, replace=false)
-p = plot_recs(sample_loader(test_loader), inds)
+modelpath = "saved_models/gen_3lvl/double_H_mnist_noisy_2quad_generative_v0/add_offset=true_asz=6_bsz=64_esz=32_glimpse_len=4_img_channels=1_imzprod=784_scale_offset=1.5_scale_offset_sense=3.2_seqlen=2_α=2.0_β=0.01_η=4e-5_λ=0.0001_λf=0.167_λpatch=0.0_π=32_175eps.bson"
+
+Hx, Ha, Encoder = load(modelpath)[:model] |> gpu
 
 ## =====
+let
+    inds = sample(1:args[:bsz], 6, replace=false)
+    p = plot_recs(sample_loader(test_loader), inds)
+end
+## =====
 
+
+
+## =====
 save_folder = "gen_3lvl"
 alias = "double_H_mnist_noisy_2quad_generative_v0"
 save_dir = get_save_dir(save_folder, alias)
 
 ## =====
 # todo - separate sensing network?
-args[:seqlen] = 2
-args[:scale_offset] = 1.5f0
 
-# args[:λpatch] = Float32(1 / 2 * args[:seqlen])
-args[:λpatch] = 0.0f0
-args[:λ] = 0.0001f0
-args[:D] = Normal(0.0f0, 1.0f0)
-
-args[:α] = 2.0f0
-args[:β] = 0.01f0
 
 
 args[:η] = 4e-5
@@ -311,9 +311,9 @@ lg = new_logger(joinpath(save_folder, alias), args)
 log_value(lg, "learning_rate", opt.eta)
 ## ====
 begin
-    # Ls = []
-    for epoch in 25:200
-        if epoch % 50 == 0
+    Ls = []
+    for epoch in 1:200
+        if epoch % 25 == 0
             opt.eta = 0.67 * opt.eta
             log_value(lg, "learning_rate", opt.eta)
         end
@@ -336,3 +336,34 @@ end
 
 ## ======
 
+args[:seqlen] = 2
+args[:scale_offset] = 1.5f0
+args[:D] = Normal(0.0f0, 1.0f0)
+
+modelpath = "saved_models/gen_3lvl/double_H_mnist_noisy_2quad_generative_v0/add_offset=true_asz=6_bsz=64_esz=32_glimpse_len=4_img_channels=1_imzprod=784_scale_offset=1.5_scale_offset_sense=3.2_seqlen=2_α=2.0_β=0.01_η=4e-5_λ=0.0001_λf=1.0_λpatch=0.0_π=32_50eps.bson"
+
+
+Hx, Ha, Encoder = load(modelpath)[:model] |> gpu
+
+## =====
+let
+    inds = sample(1:args[:bsz], 6, replace=false)
+    p = plot_recs(sample_loader(test_loader), inds)
+end
+## =====
+x = first(test_loader)
+full_recs, patches, zs, as, patches_t = get_loop(x)
+
+ind = 0
+begin
+    ind = mod(ind + 1, 64) + 1
+    p_rec = plot_digit(full_recs[end][:, :, 1, ind])
+    p_x = plot_digit(cpu(x)[:, :, 1, ind])
+    plot(p_rec, p_x)
+end
+
+savefig(p_rec, "plots/3lvl/pair2_rec.png")
+savefig(p_x, "plots/3lvl/pair2.png")
+
+
+## =====

@@ -33,16 +33,12 @@ dev = gpu
 
 ##=====
 
-all_chars = load("../Recur_generative/data/exp_pro/omniglot.jld2")
-xs = shuffle(vcat((all_chars[key] for key in keys(all_chars))...))
-x_batches = batch.(partition(xs, args[:bsz]))
+train_data, train_labels = MNIST(split=:train)[:]
+test_data, test_labels = MNIST(split=:test)[:]
 
-ntrain, ntest = 286, 15
-xs_train = flatten.(x_batches[1:ntrain] |> gpu)
-xs_test = flatten.(x_batches[ntrain+1:ntrain+ntest] |> gpu)
-x = xs_test[1]
+train_loader = DataLoader((train_data |> dev), batchsize=args[:bsz], shuffle=true, partial=false)
+test_loader = DataLoader((test_data |> dev), batchsize=args[:bsz], shuffle=true, partial=false)
 
-train_loader, test_loader = xs_train, xs_test
 ## =====
 dev = has_cuda() ? gpu : cpu
 
@@ -181,10 +177,9 @@ function train_model(opt, ps, train_data; args=args, epoch=1, logger=nothing, D=
                 log_value(lg, "rec_loss", rec_loss)
                 log_value(lg, "KL loss", klqp)
             end
-
             args[:α] * rec_loss + args[:β] * klqp + args[:λ] * (norm(Flux.params(Hx)) + norm(Flux.params(Ha)))
         end
-
+        foreach(x -> clamp!(x, -0.1f0, 0.1f0), grad)
         Flux.update!(opt, ps, grad)
         losses[i] = loss
         ProgressMeter.next!(progress_tracker; showvalues=[(:loss, loss)])
@@ -215,7 +210,7 @@ end
 
 ## ====
 
-args[:π] = 64
+args[:π] = 32
 args[:D] = Normal(0.0f0, 1.0f0)
 
 l_enc_za_z = (args[:π] + args[:asz]) * args[:π] # encoder (z_t, a_t) -> z_t+1
@@ -266,8 +261,6 @@ RN2 = Chain(
     LayerNorm(64, elu),
     Dense(64, 64,),
     LayerNorm(64, elu),
-    Dense(64, 64,),
-    LayerNorm(64, elu),
     zrnn(64, 64,),
     Dense(64, 64,),
     LayerNorm(64, elu),
@@ -294,20 +287,19 @@ p = plot_recs(sample_loader(test_loader), inds)
 ## =====
 
 save_folder = "enc_rnn_2lvl"
-alias = "2lvl_double_H_omni_vae_z0emb_3"
+alias = "2lvl_double_H_mnist_vae_z0emb_3"
 save_dir = get_save_dir(save_folder, alias)
 
 ## =====
 # todo - separate sensing network?
 args[:seqlen] = 4
-args[:glimpse_len] = 5
-args[:scale_offset] = 1.6f0
-args[:scale_offset_sense] = 2.0f0
+args[:glimpse_len] = 4
+args[:scale_offset] = 1.8f0
+args[:scale_offset_sense] = 2.4f0
 
 # args[:δL] = round(Float32(1 / args[:seqlen]), digits=3)
 args[:δL] = 0.0f0
-args[:λf] = 1.0f0
-args[:λ] = 0.001f0
+args[:λ] = 0.0001f0
 
 args[:α] = 1.0f0
 args[:β] = 0.1f0
