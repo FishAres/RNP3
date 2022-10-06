@@ -107,7 +107,6 @@ function model_loss(z, x, rs; args=args)
         out_full, err_emb_full = full_sequence(models, z0, a0, x; scale_offset=args[:scale_offset])
         z1, a1, x̂, patch_t, ϵ, Δz = forward_pass(z1, a1, models, x; scale_offset=args[:scale_offset_sense])
         out_1, err_emb_1 = full_sequence(z1, patch_t; scale_offset=args[:scale_offset_sense])
-
         # Lpatch += Flux.mse(flatten(x̂), flatten(patch_t))
         Lfull += Flux.mse(flatten(out_full), flatten(x))
     end
