@@ -72,8 +72,6 @@ end
 
 ## ====
 
-# todo don't bind RNN size to args[:π]
-
 args[:π] = 32
 
 l_enc_za_z = (args[:π] + args[:asz]) * args[:π] # encoder (z_t, a_t) -> z_t+1
@@ -90,59 +88,9 @@ l_dec_a = args[:asz] * args[:π] + args[:asz] # decoder z -> a, with bias
 
 Ha_bounds = [l_enc_za_a; l_fa; l_dec_a]
 
+modelpath = "saved_models/gen_2lvl/double_H_mnist_generative_v03/add_offset=true_asz=6_bsz=64_esz=32_glimpse_len=4_img_channels=1_imzprod=784_scale_offset=2.0_scale_offset_sense=3.2_seqlen=4_α=1.0_β=0.5_η=4e-5_λ=0.001_λf=0.167_λpatch=0.0_π=32_100eps.bson"
 
-Hx = Chain(
-    LayerNorm(args[:π],),
-    Dense(args[:π], 64),
-    LayerNorm(64, elu),
-    Dense(64, 64),
-    LayerNorm(64, elu),
-    Dense(64, 64),
-    LayerNorm(64, elu),
-    Dense(64, 64),
-    LayerNorm(64, elu),
-    Dense(64, sum(Hx_bounds) + args[:π], bias=false),
-) |> gpu
-
-Ha = Chain(
-    LayerNorm(args[:π],),
-    Dense(args[:π], 64),
-    LayerNorm(64, elu),
-    Dense(64, 64),
-    LayerNorm(64, elu),
-    Dense(64, sum(Ha_bounds) + args[:asz], bias=false),
-) |> gpu
-
-
-Encoder = let
-    enc1 = Chain(
-        x -> reshape(x, 28, 28, 1, :),
-        Conv((5, 5), 1 => 32, relu, pad=(1, 1)),
-        Conv((5, 5), 32 => 32, relu, pad=(1, 1)),
-        Conv((5, 5), 32 => 32, relu, pad=(1, 1)),
-        BasicBlock(32 => 32, +),
-        BasicBlock(32 => 32, +),
-        BasicBlock(32 => 32, +),
-        BasicBlock(32 => 32, +),
-        BasicBlock(32 => 32, +),
-        flatten,
-    )
-    outsz = Flux.outputsize(enc1, (28, 28, 1, args[:bsz]))
-    Chain(
-        enc1,
-        Dense(outsz[1], 64,),
-        LayerNorm(64, elu),
-        Dense(64, 64,),
-        LayerNorm(64, elu),
-        Dense(64, 64,),
-        LayerNorm(64, elu),
-        Split(
-            Dense(64, args[:π]),
-            Dense(64, args[:π])
-        )
-    )
-end |> gpu
-ps = Flux.params(Hx, Ha, Encoder)
+Hx, Ha, Encoder = load(modelpath)[:model] |> gpu
 
 ## ======
 
@@ -151,53 +99,178 @@ p = plot_recs(sample_loader(test_loader), inds)
 
 ## =====
 
-save_folder = "gen_2lvl"
-alias = "double_H_mnist_generative_v03"
-save_dir = get_save_dir(save_folder, alias)
-
-## =====
-# todo - separate sensing network?
 args[:seqlen] = 4
-args[:scale_offset] = 2.4f0
-
-# args[:λpatch] = Float32(1 / 2 * args[:seqlen])
-args[:λpatch] = 0.0f0
-args[:λ] = 0.0001f0
+args[:scale_offset] = 2.0f0
 args[:D] = Normal(0.0f0, 1.0f0)
-
-args[:α] = 1.0f0
-args[:β] = 0.5f0
-
-
-args[:η] = 4e-5
-opt = ADAM(args[:η])
-lg = new_logger(joinpath(save_folder, alias), args)
-log_value(lg, "learning_rate", opt.eta)
-## ====
-begin
-    Ls = []
-    for epoch in 1:200
-        if epoch % 40 == 0
-            opt.eta = 0.5 * opt.eta
-            log_value(lg, "learning_rate", opt.eta)
-        end
-
-        ls = train_model(opt, ps, train_loader; epoch=epoch, logger=lg)
-        inds = sample(1:args[:bsz], 6, replace=false)
-        p = plot_recs(sample_loader(test_loader), inds)
-        display(p)
-        log_image(lg, "recs_$(epoch)", p)
-        L = test_model(test_loader)
-        log_value(lg, "test_loss", L)
-        @info "Test loss: $L"
-        push!(Ls, ls)
-        if epoch % 100 == 0
-            save_model((Hx, Ha, Encoder), joinpath(save_folder, alias, savename(args) * "_$(epoch)eps"))
-        end
-    end
-end
 
 ## ====
 
 # todo - get centroids of z2 and train a new embedding for Ha
 # todo - does it look like the original z2 means after?
+
+function get_zs(x; args=args)
+    z2s, z1s = [], []
+    μ, logvar = Encoder(x)
+    # z = sample_z(μ, logvar, r)
+    z = μ
+    push!(z2s, cpu(μ))
+    θsz = Hx(z)
+    θsa = Ha(z)
+    models, z0, a0 = get_models(θsz, θsa; args=args)
+    z1, a1, x̂, patch_t = forward_pass(z0, a0, models, x; scale_offset=args[:scale_offset])
+    push!(z1s, cpu(z1))
+    out_small = full_sequence(z1, patch_t)
+    out = sample_patch(out_small, a1, sampling_grid)
+    for t = 2:args[:seqlen]
+        z1, a1, x̂, patch_t = forward_pass(z1, a1, models, x; scale_offset=args[:scale_offset])
+        push!(z1s, cpu(z1))
+        out_small = full_sequence(z1, patch_t)
+        out += sample_patch(out_small, a1, sampling_grid)
+    end
+    return vcat(z2s...), hcat(z1s...)
+end
+
+x = first(test_loader)
+
+z2, z1 = let
+    z2, z1 = [], []
+    for x in test_loader
+        z2_, z1_ = get_zs(x)
+        push!(z2, z2_)
+        push!(z1, z1_)
+    end
+    z2, z1
+end
+
+z1s = hcat(z1[1:10]...)
+z2s = hcat(z2[1:10]...)
+
+using TSne
+
+zz = hcat(shuffle(collect(eachcol(hcat(z1s, z2s))))...)
+
+Y = tsne(zz')
+
+scatter(Y[:, 1], Y[:, 2], legend=false)
+scatter(Y[:, 1], Y[:, 2], c=inds, legend=false)
+
+
+using Clustering
+
+R = kmeans(zz, 40; maxiter=200, display=:iter)
+
+zout = [R.centers zeros(Float32, args[:π], args[:bsz] - size(R.centers, 2))] |> gpu
+
+function get_loop(z, x; args=args)
+    outputs = patches, recs, as, patches_t = [], [], [], [], []
+    θsz = Hx(z)
+    θsa = Ha(za)
+    models, z0, a0 = get_models(θsz, θsa; args=args)
+    z1, a1, x̂, patch_t = forward_pass(z0, a0, models, x; scale_offset=args[:scale_offset])
+    out_small = full_sequence(z1, patch_t)
+    out = sample_patch(out_small, a1, sampling_grid)
+    push_to_arrays!((out, out_small, a1, patch_t), outputs)
+    for t = 2:args[:seqlen]
+        z1, a1, x̂, patch_t = forward_pass(z1, a1, models, x; scale_offset=args[:scale_offset])
+        out_small = full_sequence(z1, patch_t)
+        out += sample_patch(out_small, a1, sampling_grid)
+        push_to_arrays!((out, out_small, a1, patch_t), outputs)
+    end
+    return outputs
+end
+
+get_loop(zout, x)
+
+function plot_recs(z, x, inds; plot_seq=true, args=args)
+    full_recs, patches, xys, patches_t = get_loop(z, x)
+    p = plot_seq ? let
+        patches_ = map(x -> reshape(x, 28, 28, 1, size(x)[end]), patches)
+        [plot_rec(full_recs[end], x, patches_, ind) for ind in inds]
+    end : [plot_rec(full_recs[end], x, ind) for ind in inds]
+
+    return plot(p...; layout=(length(inds), 1), size=(600, 800))
+end
+
+inds = sample(1:args[:bsz], 6, replace=false)
+p = plot_recs(zout, sample_loader(test_loader), inds)
+
+## =====
+
+function get_centroid_z(x; n_clusters=10)
+    # z2, z1 = get_zs(x)
+    z2, _ = get_zs(x)
+    R = kmeans(z2, n_clusters; maxiter=200)
+    zout = [R.centers zeros(Float32, args[:π], args[:bsz] - size(R.centers, 2))] |> gpu
+    zout
+end
+
+function model_loss_centroids(x; args=args)
+    z = Zygote.ignore() do
+        get_centroid_z(x)
+    end
+    θsz = Hx(z)
+    θsa = Ha(za)
+    models, z0, a0 = get_models(θsz, θsa; args=args)
+    z1, a1, x̂, patch_t = forward_pass(z0, a0, models, x; scale_offset=args[:scale_offset])
+    out_small = full_sequence(z1, patch_t)
+    out = sample_patch(out_small, a1, sampling_grid)
+    Lpatch = Flux.mse(flatten(out_small), flatten(patch_t); agg=sum)
+    for t = 2:args[:seqlen]
+        z1, a1, x̂, patch_t = forward_pass(z1, a1, models, x; scale_offset=args[:scale_offset])
+        out_small = full_sequence(z1, patch_t)
+        out += sample_patch(out_small, a1, sampling_grid)
+        Lpatch += Flux.mse(flatten(out_small), flatten(patch_t); agg=sum)
+    end
+    rec_loss = Flux.mse(flatten(out), flatten(x); agg=sum)
+    return rec_loss + args[:λpatch] * Lpatch
+end
+
+function train_model_centroids(opt, ps, train_data; args=args, epoch=1, logger=nothing, D=args[:D])
+    progress_tracker = Progress(length(train_data), 1, "Training epoch $epoch :)")
+    losses = zeros(length(train_data))
+    # initial z's drawn from N(0,1)
+    for (i, x) in enumerate(train_data)
+        loss, grad = withgradient(ps) do
+            rec_loss = model_loss_centroids(x)
+            logger !== nothing && Zygote.ignore() do
+                log_value(lg, "rec_loss", rec_loss)
+            end
+            rec_loss + args[:λ] * (norm(Flux.params(Hx)) + norm(Flux.params(Ha)))
+        end
+        # foreach(x -> clamp!(x, -0.1f0, 0.1f0), grad)
+        Flux.update!(opt, ps, grad)
+        losses[i] = loss
+        ProgressMeter.next!(progress_tracker; showvalues=[(:loss, loss)])
+    end
+    return losses
+end
+
+function test_model_centroids(test_data; D=args[:D])
+    rs = [rand(D, args[:π], args[:bsz]) for _ in 1:length(test_data)] |> gpu
+    L = 0.0f0
+    for (i, x) in enumerate(test_data)
+        rec_loss = model_loss_centroids(x)
+        L += rec_loss
+    end
+    return L / length(test_data)
+end
+
+
+zout = get_centroid_z(x)
+
+r = randn(Float32, args[:π], args[:bsz]) |> gpu
+
+za = randn(Float32, args[:π], args[:bsz]) |> gpu
+
+ps = Flux.params(za)
+
+test_model_centroids(test_loader)
+
+opt = ADAM(1e-4)
+ls = train_model_centroids(opt, ps, train_loader)
+
+
+inds = sample(1:args[:bsz], 6, replace=false)
+x = sample_loader(test_loader)
+zout = get_centroid_z(x)
+p = plot_recs(zout, x, inds)
